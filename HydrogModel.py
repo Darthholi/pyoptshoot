@@ -6,7 +6,9 @@ import scipy as sp
 from scipy.integrate import odeint
 import matplotlib.pyplot as plt
 import theano.tensor as T
+from theano.ifelse import ifelse
 import theano
+from theano import shared
 
 import copy
 from theano.compile.io import In
@@ -105,23 +107,28 @@ def main():
     def state(x, t, w, p,dataarrays):
         # dx=statesens(t,x,w,ks,ModelData); for later with sensitivity
         # dx=T.zeros(ModelData['numstates']+1,1);#column of state variables plus cost variable
-        dx = [0, 0, 0]
+        dx = [T.vector(),T.vector(),T.vector()]
         #bc = np.interp(t, ModelData['PowerConditions'][:, 0],ModelData['PowerConditions'][:, 1])  # dod zvladne tohle theano graf?
         #tl = np.clamp(np.floor(t),0,ModelData['PowerConditions'].shape[0]-1) #thanks to python indexing it will go around cyclically
         tl = T.cast(T.floor(t),'int32')  # thanks to python indexing it will go around cyclically
-        bc = dataarrays[0][tl] * (t-tl) + dataarrays[0][T.cast(tl+1,'int32')]* (1-t+tl)
+        #bc = dataarrays['PowerConditions'][tl] * (t-tl) + dataarrays['PowerConditions'][T.cast(tl+1,'int32')]* (1-t+tl)
+        PowerCond = shared(ModelData['PowerConditions'][:,1])
+        bc = PowerCond[tl] * (t - tl) + PowerCond[T.cast(tl + 1, 'int32')] * (1 - t + tl)
         xPWO = bc
         ubatt = w[0] * ModelData['ControlScales']
-        if (ubatt >= 0):  # into batt % w(ks,1) = ubatt
-            xPWO = xPWO - ubatt
-            dx[0] = ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0]  # x1'  for battery
-        else:
-            xPWO = xPWO - ubatt
-            dx[0] = ubatt - ModelData['cBattSigma'] * x[0]
+        #if (ubatt >= 0):  # into batt % w(ks,1) = ubatt
+        #    xPWO = xPWO - ubatt
+        #    dx[0] = ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0]  # x1'  for battery
+        #else:
+        #    xPWO = xPWO - ubatt
+        #    dx[0] = ubatt - ModelData['cBattSigma'] * x[0]
+        xPWO = xPWO - ubatt
+        dx[0] = T.switch(T.ge(ubatt,0.0),ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0],  # x1'  for battery
+          ubatt - ModelData['cBattSigma'] * x[0])
 
         ufc = w[0] * ModelData['ControlScales']
 
-        if (ufc >= 0):  # into h2 w(ks,2) = ucell    "one empirical model" - electrolyzer
+        """if (ufc >= 0):  # into h2 w(ks,2) = ucell    "one empirical model" - electrolyzer
             xPWO = xPWO - ufc * (
             ModelData['ElecVrev'] + (ModelData['Elecr1'] + ModelData['Elecr2'] * ModelData['ElecTemp']) *
             (ufc / ModelData['ElecA']) +
@@ -141,19 +148,38 @@ def main():
             ModelData['Cellm'] * T.exp(areacurrent * ModelData['Celll']))
             # eaten hydrogen in units of [H2 times n_e times FaradayCOnstant]:
             dx[1] = ufc * ModelData['CellNumCell'] * ModelData['CellFInvefficiency']
-
-        if (xPWO >= 0):
-            dx[2] = xPWO * ModelData['cSellPower']
-        else:
-            dx[2] = xPWO * ModelData['cBuyPower']
+        """
+        electrolyzerpwo = ufc * (
+            ModelData['ElecVrev'] + (ModelData['Elecr1'] + ModelData['Elecr2'] * ModelData['ElecTemp']) *
+            (ufc / ModelData['ElecA']) +
+            (ModelData['Elecs1'] + ModelData['Elecs2'] * ModelData['ElecTemp'] + ModelData['Elecs3'] * ModelData[
+                'ElecTemp'] ** 2) *
+            T.log(1 + (ufc / ModelData['ElecA']) * (
+            ModelData['Elect1'] + ModelData['Elect2'] * ModelData['ElecTemp'] + ModelData['Elect3'] *
+            ModelData['ElecTemp'] ** 2)))
+        areacurrent = (-ufc / ModelData['CellA'])  # inside the cell
+        fuelcellpwo = ModelData['CellNumCell'] * ufc * (
+          ModelData['CellVrev'] + ModelData['CellB'] * T.log(ModelData['Celli0'])
+          - ModelData['CellAt'] * T.log(areacurrent) - areacurrent * ModelData['Cellr'] +
+          ModelData['Cellm'] * T.exp(areacurrent * ModelData['Celll']))
+        
+        xPWO = xPWO - T.switch(T.ge(ufc,0.0),electrolyzerpwo,fuelcellpwo)
+        dx[1] = T.switch(T.ge(ufc,0.0),ModelData['ElecNumCells'] * ufc * ModelData['ElecFefficiency'],
+                       ufc * ModelData['CellNumCell'] * ModelData['CellFInvefficiency'])
+        
+        #if (xPWO >= 0):
+        #    dx[2] = xPWO * ModelData['cSellPower']
+        #else:
+        #    dx[2] = xPWO * ModelData['cBuyPower']
+        dx[2] = T.switch(T.ge(xPWO,0.0),xPWO * ModelData['cSellPower'],xPWO * ModelData['cBuyPower'])
 
         return dx
 
-    def ModelFunkce(sim, control):
+    def ModelFunkce(sim, control, params):
         # control is a matrix (controldim x (discretization points-1)), sim is a vector at the final state.
 
         # ret={obj: None, objgrad: None, eqcon: None, eqcongrad: None, incon: None, incongrad:None}
-
+        ret = {}
         # sim = fun( x0, ts, ws)
         # simulation result using given controls ws and souhld return a function to minimize
         ret['obj'] = -sim[2] - ModelData['cSellFinalPower'] * (sim[0] + sim[1] * ModelData[
@@ -178,17 +204,19 @@ def main():
         # c = [f(4)-ModelData.Wbattmaxf(5)-ModelData.Wfcmax...
         #    -f(7)-f(8)]' #\leq 0                             #radek ... toto ma byt mensi nez nula
         ret['incon'] = [-sim[0], -sim[1], sim[0] - ModelData['Wbattmax'], sim[1] - ModelData['Wfcmax']]
+        return ret
 
-    x0 = [ ModelData['Wbattinit'], 0, 0 ] # Initial states+1 state for cost variable .. yes it is discretized too
+    x0 = [ ModelData['Wbattinit'], 0 ]
     xend=[None,None,None]
     OptimSim = solv.SimModel(x0,xend,
-                      stateMax=[ModelData['Wbattmax'],ModelData['Wfcmax'],np.inf],
-                      stateMin=[0,0,-np.inf],
+                      stateMax=[ModelData['Wbattmax'],ModelData['Wfcmax']],
+                      stateMin=[0,0],
+                      laststatesum = True, #last state returned by odesim will be a cost function to be summed up and NOT discretized... #dod rict ze stavy popisujeme dva ale ze funkce bude pouzivat dalsi 1 na ukladani ceny...
                       controlMax=[ModelData['Pbattplusmax']/ModelData['ControlScales'],ModelData['Ph2plusmax']/ModelData['ControlScales']],
                       controlMin=[ModelData['Pbattminusmax']/ModelData['ControlScales'],ModelData['Ph2minusmax']/ModelData['ControlScales']],
-                      #multipleshootingdim,     #dod rict ze stavy popisujeme dva ale ze funkce bude pouzivat dalsi 1 na ukladani ceny...
                       fodestate=state,
                       ffinalobjcon=ModelFunkce,
+                      constarrays= None, #constarrays = {'PowerConditions': ModelData['PowerConditions'][:, 1]},
                       fpathconstraints=None,              #others than min max
                       otherparamsMin=None,   #params to optimize, that are not states and not controls...
                       otherparamsMax=None)

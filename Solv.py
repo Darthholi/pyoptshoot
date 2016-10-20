@@ -1,7 +1,4 @@
 """
-todo:
--theano vector function to matrix
--testy funkci predtim nez...
 -integrator pro kresleni grafu
 -p jako parametry pro optimalizaci nejsou zaneseny dovnitr do funkce a finalnimodelfunkce
 
@@ -22,6 +19,14 @@ import theano
 from scipy.integrate import odeint
 import scipy.optimize
 import matplotlib.pyplot as plt
+from pyOpt import Optimization
+from pyOpt.pyPSQP import pyPSQP
+#import pyOpt.pyPSQP.psqp
+#http://stackoverflow.com/questions/2883189/calling-matlab-functions-from-python
+##https://www.python-forum.de/viewtopic.php?t=37839 pyopt64bit
+#http://scicomp.stackexchange.com/questions/83/is-there-a-high-quality-nonlinear-programming-solver-for-python
+#PSQP SLSQP scipy.optimize.minimize...
+#fsqp nlpqlp commercial
 
 class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint and gradients are computed together. IF THE Objective is the first one to call everytime! (#otherwise can check lastx....)
   def __init__(self,
@@ -74,9 +79,11 @@ class SimModel:
         constarrays = None,
         otherparamsMin=None,   #params to optimize, that are not states and not controls...
         otherparamsMax=None,
+        laststatesum = False,
         T=1):
     self.statebeg = np.array(statebeg)                  #None means IS not fixed...
     self.stateend = np.array(stateend)
+    self.laststatesum = laststatesum
     for i in xrange(len(stateMax)):
       if (stateMax[i]>np.finfo('float32').max/20.0):
         stateMax[i] = np.finfo('float32').max/20.0
@@ -196,18 +203,21 @@ class SimModel:
     print self.multipleshootingdim
     print self.ndisc-2
     
+    cstartzeroes = True
+    
     controlfrng = None
     if (self.controlfdim>0):
       controlfrng = np.empty([self.controlfdim, self.ndisc - 1], 'float32')
       for i in xrange(self.controlfdim):
-        controlfrng[i,:] = np.random.uniform(low=self.controlMin[i], high=self.controlMax[i],size=(1,self.ndisc-1))
+        controlfrng[i,:] = np.zeros((1,self.ndisc-1)) if cstartzeroes else np.random.uniform(low=self.controlMin[i], high=self.controlMax[i],size=(1,self.ndisc-1))
     randinitx = np.empty([self.multipleshootingdim,self.ndisc-2],'float32')  
     for i in xrange(self.multipleshootingdim):
-      randinitx[i,:] = np.random.uniform(low=self.stateMin[i], high=self.stateMax[i], size=(1,self.ndisc-2))
+      randinitx[i,:] = np.zeros((1,self.ndisc-2)) if cstartzeroes else np.random.uniform(low=self.stateMin[i], high=self.stateMax[i], size=(1,self.ndisc-2))
     otherparamsinit = None
     if (len(self.otherparamsMin.shape)>0):
       otherparamsinit = np.random.uniform(low=self.otherparamsMin,high=self.otherparamsMax)
-    x0 = self.PackForOptim(np.random.uniform(low=self.stateMin, high=self.stateMax),
+      
+    x0 = self.PackForOptim(np.zeros(self.stateMin.shape) if cstartzeroes else np.random.uniform(low=self.stateMin, high=self.stateMax),
                       randinitx,       #np.random.uniform(low=self.stateMin, high=self.stateMax, size=(self.multipleshootingdim,self.ndisc-2))
                       controlfrng,      #np.random.uniform(low=self.controlMin, high=self.controlMax,size=(self.controlfdim,self.ndisc-1)
                       otherparamsinit
@@ -249,12 +259,13 @@ class SimModel:
     #print wL
     #print wU
     
-    ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays)#state,ModelFunkce)
+    ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,self.laststatesum)#state,ModelFunkce)
     def ObjFromPacked(Inp):
       case=self.UnpackForOptim(Inp)                                                    #1) unpack for optim can be included to theano
       case['k']=self.odeintsteps
       case['Tmax']=self.T
-      case.update(self.constarrays) #we add the calling constant arrays .. each iteration they are the same...
+      if (self.constarrays is not None):
+        case.update(self.constarrays) #we add the calling constant arrays .. each iteration they are the same...
       computedsim = ParallelizSim(**case)
       #apply state-control-param path constraints:
       if (self.fpathconstraints != None):                                          #2) apply state constraints can be included to theano...
@@ -286,37 +297,69 @@ class SimModel:
     #calleval.ObjCall({'x': konkretni hodnota x, 'u': konretni hodnota u, 'k': pocet integracnich iteraci})
     calleval = ModelMultiEval(ObjFromPacked)     #object remembering all that we have computed to not call sim again for constraints...
 
-    haseqcon = (calleval.EqConCall(x0) is not None)
-    hasincon = (calleval.InConCall(x0) is not None)
+    eqconx0 = calleval.EqConCall(x0)
+    inconx0 = calleval.InConCall(x0)
+    haseqcon = (eqconx0 is not None)
+    hasincon = (inconx0 is not None)
     if (haseqcon or hasincon):
       xconstr = []
       if (haseqcon):
         xconstr.append({'type': 'eq', 'fun': calleval.EqConCall})
       if (hasincon):
-        xconstr.append( {'type': 'ineq', 'fun': calleval.InConCall})
+        xconstr.append( {'type': 'ineq', 'fun': calleval.InConCall})#inequality means that it is to be non-negative
     else:
       xconstr = () #empty iterable...
 
-    res = scipy.optimize.minimize(fun = calleval.ObjCall,
-        x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None,
-        bounds=zip(wL,wU),     #dod je zip spravne?
-        constraints=xconstr,
-        tol=1e-9, callback=None,       
-        options={'maxiter': self.maxoptimizers, 'disp':True})
-        #http://stackoverflow.com/questions/23476152/dynamically-writing-the-objective-function-and-constraints-for-scipy-optimize-mihttp://stackoverflow.com/questions/23476152/dynamically-writing-the-objective-function-and-constraints-for-scipy-optimize-mi
-    
-    if (not res.success):
-      print(res.message)
-    print('Objective function at minimum: (computed by theano) ')
-    print(res.fun)
-    if (hasattr(res,'maxcv')):
-      print('Constraint violation (computed by theano) ')
-      print(res.maxcv)
-    found = UnpackForOptim(res.x)
-    return found
-    #found.x - states x (ndisc-2) ....states    (incl. beginning)
-    #found.u - controls x (ndisc-2) ....controls
-    #found.p - params   
+    cusescipy = False
+    if (cusescipy):
+      res = scipy.optimize.minimize(fun = calleval.ObjCall,
+          x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None, #SLSQP #BFGS #COBYLA
+          bounds=zip(wL,wU),     #dod je zip spravne?
+          constraints=xconstr,
+          tol=1e-9, callback=None,
+          options={'maxiter': self.maxoptimizers, 'disp':True, 'iprint':2})
+          #http://stackoverflow.com/questions/23476152/dynamically-writing-the-objective-function-and-constraints-for-scipy-optimize-mihttp://stackoverflow.com/questions/23476152/dynamically-writing-the-objective-function-and-constraints-for-scipy-optimize-mi
+      
+      if (not res.success):
+        print(res.message)
+      print('Objective function at minimum: (computed by theano) ')
+      print(res.fun)
+      if (hasattr(res,'maxcv')):
+        print('Constraint violation (computed by theano) ')
+        print(res.maxcv)
+      found = self.UnpackForOptim(res.x)
+      return found
+      #found.x - states x (ndisc-2) ....states    (incl. beginning)
+      #found.u - controls x (ndisc-2) ....controls
+      #found.p - params
+    else:
+      def pyoptobj(x):
+        fail = 0 #ok
+        g = []
+        if (haseqcon and hasincon):
+          g=np.concatenate(calleval.EqConCall(x),calleval.InConCall(x))
+        elif (haseqcon):
+          g = calleval.EqConCall(x)
+        elif (hasincon):
+          g = calleval.InConCall(x)
+        return calleval.ObjCall(x),g,fail
+      
+      opt_prob = Optimization('Multipleshooting', pyoptobj)
+      for i in xrange(len(x0)):
+        opt_prob.addVar('x'+str(i), 'c', lower = wL[i], upper = wU[i], value=x0[i])
+      opt_prob.addObj('f')
+
+      if (haseqcon):
+        opt_prob.addConGroup('EqCons', len(eqconx0), type='e', equal=0.0)
+      if (hasincon):
+        opt_prob.addConGroup('InCons', len(inconx0), type='i', lower=0.0)
+
+      opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
+      #FSQP(options={'iprint': 3, 'miter': self.maxoptimizers })
+      opt(opt_prob, sens_type='FD', disp_opts=True, sens_mode='')
+      # Solve Problem with Optimizer Using Finite Differences
+      print opt_prob.solution(0)
+      return opt_prob.solution(0)
     
   def DrawResults(self,Sim):
     #-------------------------------------
@@ -332,8 +375,8 @@ class SimModel:
     Tmax = self.T
     tspace= np.linspace(0,Tmax,100)
     def integstate(x,t):
-      u=Sim['u'][:,floor(t/Tmax)]
-      return state(x,t,u)
+      u=Sim['u'][:,int(np.floor(t/Tmax))]
+      return self.fodestate(x,t,u,Sim['p'],self.constarrays)
      
     #spojite: 
     sol=odeint(integstate, init, tspace)
@@ -407,12 +450,19 @@ def theano_inner_rk4_step(#accum:                               #i_step je integ
   return i_step+1,T.cast(accum + t_step/6.0 *( k1 + 2*k2 + 2*k3 + k4),'float32')
   #return i_step+1,T.cast(accum + t_step *f(accum,Tim_t),'float32')                       #euler
             
-def BuildTheanoIntegrator(f):                         #dod  
+def BuildTheanoIntegrator(f,doaddstatezeros):
   Tmax = T.scalar("Tmax")       
   k = T.iscalar("k")                #pocet iteraci
-  x_begs = T.matrix("x_begs")       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
+  x_begs = T.matrix("x_begs",'float32')       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
   #u_function = T.matrix("u_function")   #parametrizovana ridici funkce                                      --------parametr
   #f = definovanatheano expression
+  
+  if (doaddstatezeros):
+    # new_zers = T.zeros((1,x_begs.shape[1]))
+    # x_begs = T.unbroadcast(T.concatenate([x_begs,new_zers],axis = 1))
+    new_x = T.zeros((x_begs.shape[0]+1,x_begs.shape[1]),'float32')
+    new_x = T.set_subtensor(new_x[0:-2,:],x_begs)
+    x_begs = new_x
   
   # Symbolic description of the result
   # f vstupuje pri kompilaci.... ostatni jako non_sequences... (DOD pridat f jako nonsequence?)
@@ -451,7 +501,7 @@ def BuildTheanoIntegrator(f):                         #dod
 ['ineqcon']
 """
   
-def BuildTheanoModel(f,objcon,constarrays):
+def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
 
   #if (self.controlfdim <= 0):
   #  def finteg(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
@@ -460,59 +510,62 @@ def BuildTheanoModel(f,objcon,constarrays):
   #else:
   u_function = T.matrix("u_function")   #parametrizovana ridici funkce
   p_params = T.vector("p_params")
+
+  inputsarray = []
+  theano_constarrays = None
+  if constarrays is not None:
+    if isinstance(constarrays, dict):
+      theano_constarrays = {}
+      for key in constarrays.keys():
+        theano_constarrays[key] = TensorType('float32', (False,)*len(constarrays[key].shape))#T.matrix("constarrays_" + key)
+        inputsarray.append(In(theano_constarrays[key], name=key))
+        # else:#error
   
   def finteg(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-    listres = f(accum,t[0],u_function,p_params)
+    listres = f(accum,t[0],u_function,p_params,theano_constarrays)
     return theano.tensor.stack(*listres) #f does not need to use theano notation, can return [a,b]
-  integratorvars = BuildTheanoIntegrator(finteg)
+  integratorvars = BuildTheanoIntegrator(finteg,sumlastaxis)
 
-  #integratorvars['results_var'][:,-1] shoud be "all state variables; at their last point"
+  ##integratorvars['results_var'][:,-1] shoud be "all state variables; at their last point"
   #into this function the objcon goes for all computed path endings to get all possible custom path constraints
-  result = objcon(integratorvars['results_var'],u_function,p_params)                       #moznost dat pouze koncovy body uz tady
-  #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
-  result['obj']=result['obj'][-1]
-  #smerujeme k  
-  #return self.result['obj']
-  #  return self.result['eqcon'] 
-  #  return self.result['incon']                    #dod posun se o jedna
-  #numpoints = integratorvars['xbegs_var'].shape[1]
-  #if (result['eqcon'] == None):
-  #  result['eqcon'] = []
-  #result['eqcon'] = result['eqcon'].extend(
-  ##dod tohle pro kazdou slozku vektorovy funkce az na tu posledni, ktera integruje cenu a scita se sama...
-  ##je tu moznost z toho udelat vic eq constraints, nebo to vsechno sumovat do jedny... zatim sumujeme do jedny...
-  #T.sub(integratorvars['xbegs_var'][1:numpoints],integratorvars['results_var'][0:numpoints-1])) #vezmeme ze je VIC rovnic
-  #for ipoint in range(0,numpoints.eval()-1): #max is numpoints-2
-  #  integratorvars['xbegs_var'][ipoint+1]-integratorvars['results_var'][ipoint]) #vezmeme ze je VIC rovnic
+  #integratorresults = T.zeros([integratorvars['results_var'].shape[0]])
+  integratorresults = integratorvars['results_var'][:,-1] #should be the last value for each integrato result
+  if (sumlastaxis):
+    #integratorvars['results_var'][-1] = T.elemwise.Sum(integratorvars['results_var'][-1])
+    integratorresults = T.set_subtensor(integratorresults[-1], T.sum(integratorvars['results_var'][-1,:]))
   
-  #ends = integratorvars['results_var'][:,1:numpoints] ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
-  #begs = integratorvars['xbegs_var'][:,0:numpoints-1]
+  #result = objcon(integratorvars['results_var'],u_function,p_params)                       #moznost dat pouze koncovy body uz tady
+  ## #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
+  #result['obj']=result['obj'][-1]#if we put arrays into integratorresults
+  result = objcon(integratorresults,u_function,p_params)                       #moznost dat pouze koncovy body uz tady
+  #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
+  
   ends = integratorvars['results_var'][:,1:-1] ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
   begs = integratorvars['xbegs_var'][:,0:-2]
-  if (result['eqcon'] == None):
+  if (result['eqcon'] == None or len(result['eqcon'])<=0):
     result['eqcon'] = T.flatten(ends-begs)
   else:
     result['eqcon'] = T.concatenate(result['eqcon'],T.flatten(ends-begs))
+    
+  #if the function returns list of matrices for example, we need to make one big vector out of it...
+  if (isinstance(result['incon'],list) and len(result['incon'])>=1):
+    for il in result['incon']:
+      il = T.flatten(il)
+    if len(result['incon'])==1:
+      result['incon'] = result['incon'][0]
+    else:
+      result['incon'] = T.stack(result['incon'])
     
   theanoresult={}
   for key in result:
     if (result[key] is not None):
       theanoresult[key] = result[key] #Out(variable = result[key])#, name = key) variant #2
-
-  inputsarray = [In(integratorvars['xbegs_var'], name='x'),
-   In(u_function, name='u'),
-   In(p_params, name='p'),
-   In(integratorvars['numsteps_var'], name='k'),
-   In(integratorvars['Tmax_var'], name='Tmax')]
-  if constarray is not None:
-    if isinstance(constarray,dict):
-      theano_constarryas = []
-      for key in constarrays.keys():
-        theano_constarryas[key] = T.matrix("constarrays_" + key)
-        inputsarray.add(In(theano_constarrays[key], name = key))
-    #else:#error
-    
-      
+  
+  inputsarray =  [In(integratorvars['xbegs_var'], name='x'),
+                 In(u_function, name='u'),
+                 In(p_params, name='p'),
+                 In(integratorvars['numsteps_var'], name='k'),
+                 In(integratorvars['Tmax_var'], name='Tmax')] + inputsarray
   
   theano.config.on_unused_input = 'warn'
   objective_call = theano.function(inputs=inputsarray,
