@@ -25,15 +25,16 @@ def main():
     # ---------------consts------------------------------------------------------------------
 
     timescales = 60.0 * 60.0
+    powerscales = 0.00001
 
     ModelData = {
         'TimeScales': timescales,
         # reasons: not scaled time to hours it would take years to integrate AND ca significantly improve stability by right scaling
         'ControlScales': 100,
         # reasons: scaling can improve speed (cos algorithm step size is 1) AND can affect stability by the right scaling.
-        'cSellPower': 100.0 * timescales,
-        'cBuyPower': 200.0 * timescales,
-        'cSellFinalPower': 150.0,  # in order for algorithm not to try to sell all the power before final time.
+        'cSellPower': 100.0 *powerscales * timescales,
+        'cBuyPower': 200.0 *powerscales * timescales,
+        'cSellFinalPower': 150.0*powerscales,  # in order for algorithm not to try to sell all the power before final time.
         'cBattEfficiency': 0.9,  # now same for charge and discharge. TODO - change.
         'cH2Efficiency': 0.91,
         'cBattSigma': 0.001 * timescales,
@@ -206,11 +207,11 @@ def main():
         ret['incon'] = [-sim[0], -sim[1], sim[0] - ModelData['Wbattmax'], sim[1] - ModelData['Wfcmax']]
         return ret
 
-    x0 = [ ModelData['Wbattinit'], 0 ]
-    xend=[None,None,None]
+    x0 = [ ModelData['Wbattinit'], 0]#,0 ]
+    xend=[None,None]#,None]
     OptimSim = solv.SimModel(x0,xend,
-                      stateMax=[ModelData['Wbattmax'],ModelData['Wfcmax']],
-                      stateMin=[0,0],
+                      stateMax=[ModelData['Wbattmax'],ModelData['Wfcmax']],#,np.inf],
+                      stateMin=[0,0],#,-np.inf],
                       laststatesum = True, #last state returned by odesim will be a cost function to be summed up and NOT discretized... #dod rict ze stavy popisujeme dva ale ze funkce bude pouzivat dalsi 1 na ukladani ceny...
                       controlMax=[ModelData['Pbattplusmax']/ModelData['ControlScales'],ModelData['Ph2plusmax']/ModelData['ControlScales']],
                       controlMin=[ModelData['Pbattminusmax']/ModelData['ControlScales'],ModelData['Ph2minusmax']/ModelData['ControlScales']],

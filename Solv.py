@@ -20,13 +20,15 @@ from scipy.integrate import odeint
 import scipy.optimize
 import matplotlib.pyplot as plt
 from pyOpt import Optimization
-from pyOpt.pyPSQP import pyPSQP
-#import pyOpt.pyPSQP.psqp
+from pyOpt.pySLSQP import pySLSQP
+#from pyOpt.pyPSQP import pyPSQP
 #http://stackoverflow.com/questions/2883189/calling-matlab-functions-from-python
 ##https://www.python-forum.de/viewtopic.php?t=37839 pyopt64bit
 #http://scicomp.stackexchange.com/questions/83/is-there-a-high-quality-nonlinear-programming-solver-for-python
 #PSQP SLSQP scipy.optimize.minimize...
 #fsqp nlpqlp commercial
+#theano.config.optimizer = 'fast_compile' #'None' #'fast_run' #fast compile
+#theano.config.exception_verbosity = 'high'
 
 class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint and gradients are computed together. IF THE Objective is the first one to call everytime! (#otherwise can check lastx....)
   def __init__(self,
@@ -35,39 +37,46 @@ class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint
     self.MasterFun=MasterFun
     self.lastx = None
     self.result = None
+    self.debugprint = True
+    self.iter = 0
+    
+  def FuncCall(self,x):
+    if (self.lastx is None or np.any(x != self.lastx)):
+      if (self.result is not None):
+        self.oldobj = self.result['obj']
+      self.result = copy.deepcopy(self.MasterFun(x))  # only thing needed if no dbugprint
+
+      if (self.debugprint and self.lastx is not None):
+        self.iter +=1
+        print "res: "+str(self.result['obj'])+" at iter "+str(self.iter)+" xdiff: "+str(np.max(np.abs(x - self.lastx)))+" objdiff:"+str(self.result['obj']-self.oldobj)
+    
+      self.lastx = copy.deepcopy(x)  # only thing needed if no debugprint
     
   def ObjCall(self,x):
-    if (self.lastx is None or np.all(x != self.lastx)):
-      self.lastx = copy.deepcopy(x)
-      self.result = self.MasterFun(x)
+    self.FuncCall(x)
     return float(self.result['obj'])
     
   def ObjGradCall(self,x):
-    if (self.lastx is None or np.all(x != self.lastx)):
-      self.ObjCall(x)
+    self.FuncCall(x)
     return self.result['objgrad']
     
   def EqConCall(self,x):
-    if (self.lastx is None or np.all(x != self.lastx)):
-      self.ObjCall(x)
+    self.FuncCall(x)
     return self.result['eqcon']
     
   def EqConGradCall(self,x):
-    if (self.lastx is None or np.all(x != self.lastx)):
-      self.ObjCall(x)
+    self.FuncCall(x)
     return self.result['eqcongrad']
    
   def InConCall(self,x):
-    if (self.lastx is None or np.all(x != self.lastx)):
-      self.ObjCall(x)
+    self.FuncCall(x)
     if ('incon' in self.result):
       return self.result['incon']
     else:
       return None
    
   def InConGradCall(self,x):
-    if (self.lastx == None or x != self.lastx):
-      self.ObjCall(x)
+    self.FuncCall(x)
     return self.result['incongrad'] 
     
 
@@ -121,7 +130,7 @@ class SimModel:
     self.PackForOptimSize = 0  
     for i in range(self.statebeg.shape[0]):
         if (self.statebeg[i] == None):  #if it is NONE then it IS a parameter to be optimized, so pack him
-          self.PackForOptimSize+=5
+          self.PackForOptimSize+=1
           self.startmaptopack.append(i) 
     self.PackForOptimSize += (self.ndisc-2)*self.multipleshootingdim #self.statebeg.size[0] #each state has its own discretization points
     self.PackForOptimSize += (self.ndisc-1)*self.controlfdim  #each control has its own discretization points - also in the first point!
@@ -185,8 +194,8 @@ class SimModel:
       if (len(self.otherparamsMin.shape)>0):
         ret['p'][:]=Packed[xoffset:]  #totally should be ... otherparamsMin.size[0]
      
-      print self.controlfdim 
-      print ret['u'].shape
+      #print self.controlfdim
+      #print ret['u'].shape
            
       return ret
       
@@ -260,13 +269,20 @@ class SimModel:
     #print wU
     
     ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,self.laststatesum)#state,ModelFunkce)
-    def ObjFromPacked(Inp):
+    def ObjFromPacked(self,Inp):
       case=self.UnpackForOptim(Inp)                                                    #1) unpack for optim can be included to theano
       case['k']=self.odeintsteps
       case['Tmax']=self.T
       if (self.constarrays is not None):
         case.update(self.constarrays) #we add the calling constant arrays .. each iteration they are the same...
+
+      printdebug = False
+      if (printdebug):
+        print "x: "+str(case['x'])
+        print "u: "+str(case['u'])
+        
       computedsim = ParallelizSim(**case)
+      #print computedsim['debug1']
       #apply state-control-param path constraints:
       if (self.fpathconstraints != None):                                          #2) apply state constraints can be included to theano...
         for i in range(self.ndisc-1):
@@ -292,11 +308,16 @@ class SimModel:
         return computedsim
       #apply multiple shooting algorithm constraints
       #already done, parallelized.... computedsim['eqcon'].extend()
+    
+    #self.ObjFromPacked = ObjFromPacked
             
     #v kazdy iteraci optimalizatoru
     #calleval.ObjCall({'x': konkretni hodnota x, 'u': konretni hodnota u, 'k': pocet integracnich iteraci})
     calleval = ModelMultiEval(ObjFromPacked)     #object remembering all that we have computed to not call sim again for constraints...
 
+    objx0 = calleval.ObjCall(x0)
+    print "obj at x0 " + str(objx0) #important to have different obj at different points ....
+    print "obj at wL "+str(calleval.ObjCall(wL))
     eqconx0 = calleval.EqConCall(x0)
     inconx0 = calleval.InConCall(x0)
     haseqcon = (eqconx0 is not None)
@@ -310,7 +331,7 @@ class SimModel:
     else:
       xconstr = () #empty iterable...
 
-    cusescipy = False
+    cusescipy = True
     if (cusescipy):
       res = scipy.optimize.minimize(fun = calleval.ObjCall,
           x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None, #SLSQP #BFGS #COBYLA
@@ -337,7 +358,7 @@ class SimModel:
         fail = 0 #ok
         g = []
         if (haseqcon and hasincon):
-          g=np.concatenate(calleval.EqConCall(x),calleval.InConCall(x))
+          g=np.concatenate([calleval.EqConCall(x),calleval.InConCall(x)])
         elif (haseqcon):
           g = calleval.EqConCall(x)
         elif (hasincon):
@@ -353,12 +374,14 @@ class SimModel:
         opt_prob.addConGroup('EqCons', len(eqconx0), type='e', equal=0.0)
       if (hasincon):
         opt_prob.addConGroup('InCons', len(inconx0), type='i', lower=0.0)
-
-      opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
+      print opt_prob
+      opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers})
+      #opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
       #FSQP(options={'iprint': 3, 'miter': self.maxoptimizers })
-      opt(opt_prob, sens_type='FD', disp_opts=True, sens_mode='')
+      res = opt(opt_prob, sens_type='FD', disp_opts=True, sens_mode='')
       # Solve Problem with Optimizer Using Finite Differences
       print opt_prob.solution(0)
+      print opt_prob.solution(0).opt_inform['text']
       return opt_prob.solution(0)
     
   def DrawResults(self,Sim):
@@ -374,29 +397,50 @@ class SimModel:
     init = Sim['x'][:,0]
     Tmax = self.T
     tspace= np.linspace(0,Tmax,100)
+
+    theano.config.on_unused_input = 'warn'
+    sym_x = T.vector('x', 'float32')
+    sym_t = T.scalar('t', 'float32')
+    sym_p = T.matrix('p', 'float32')
+    sym_w = T.vector('w', 'float32')
+    sym_dataarrays = T.matrix('dataarrays', 'float32')
+    onestateresult = self.fodestate(sym_x, sym_t, sym_w, sym_p, sym_dataarrays) #fodestate is defined as theano function ... so lets make python function from it
+    state_call = theano.function(inputs=[In(sym_x, name='x'),
+                                         In(sym_t, name='t'),
+                                         In(sym_w, name='w'),
+                                         In(sym_p, name='p'),
+                                         In(sym_dataarrays, name='dataarrays')],
+                                 outputs=onestateresult,  # updates=None,
+                                 allow_input_downcast=True,
+                                 on_unused_input='warn'
+                                 )
+    
+    trycall = state_call( init.astype(np.float32), np.array(0.0).astype(np.float32), Sim['u'][:,0].astype(np.float32), Sim['p'].astype(np.float32) if Sim['p'] is not None else None, self.constarrays.astype(np.float32) if self.constarrays is not None else None)
+    
     def integstate(x,t):
       u=Sim['u'][:,int(np.floor(t/Tmax))]
-      return self.fodestate(x,t,u,Sim['p'],self.constarrays)
+      #return np.array(self.fodestate(x,t,u,Sim['p'],self.constarrays))
+      return np.array(state_call( x.astype(np.float32), np.array(t,dtype=np.float32), u.astype(np.float32), Sim['p'].astype(np.float32) if Sim['p'] is not None else None, self.constarrays.astype(np.float32) if self.constarrays is not None else None))[0:init.shape[0]]
      
     #spojite: 
-    sol=odeint(integstate, init, tspace)
-    for i in range(init.shape[1]):
+    sol=odeint(integstate, np.array(init), tspace)
+    for i in range(init.shape[0]):
       plt.plot(tspace, sol[:,i], color='b')
       #plt.plot(tspace, sol[:,1], color='r')
       #plt.plot(tspace, sol[:,2], color='r')
     #plt.show()
     
     #nespojite
-    for nd in range(self.ndisc):
+    for nd in range(self.ndisc-1):
       init = Sim['x'][:,nd]
-      tspace= np.linspace((nd/self.ndisc)*Tmax,((nd+1)/self.ndisc)*Tmax,100)  
-      sol=odeint(integstate, init, tspace)
-      for i in range(init.shape[1]):
+      tspace= np.linspace((nd/self.ndisc)*Tmax,((nd+1.0)/self.ndisc)*Tmax,100)
+      sol=odeint(integstate, np.array(init), tspace)
+      for i in range(init.shape[0]):
         plt.plot(tspace, sol[:,i], color='gray')
     
-    objode = ModelFunkce(Sim[:,-1]) #objektivni funkce, tentokrat spocteno numericky bez theana a bez multipleshootingu
-    print('Objective function at minimum - without Multiple Shooting possible discontinuities: (computed by odeint ')
-    print(objode)  
+    #objode = ModelFunkce(Sim[:,-1]) #objektivni funkce, tentokrat spocteno numericky bez theana a bez multipleshootingu
+    #print('Objective function at minimum - without Multiple Shooting possible discontinuities: (computed by odeint ')
+    #print(objode)
     
     plt.show()
     
@@ -451,18 +495,19 @@ def theano_inner_rk4_step(#accum:                               #i_step je integ
   #return i_step+1,T.cast(accum + t_step *f(accum,Tim_t),'float32')                       #euler
             
 def BuildTheanoIntegrator(f,doaddstatezeros):
-  Tmax = T.scalar("Tmax")       
+  Tmax = T.scalar("Tmax")
   k = T.iscalar("k")                #pocet iteraci
-  x_begs = T.matrix("x_begs",'float32')       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
+  x_begs_input = T.matrix("x_begs",'float32')       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
   #u_function = T.matrix("u_function")   #parametrizovana ridici funkce                                      --------parametr
   #f = definovanatheano expression
   
   if (doaddstatezeros):
     # new_zers = T.zeros((1,x_begs.shape[1]))
     # x_begs = T.unbroadcast(T.concatenate([x_begs,new_zers],axis = 1))
-    new_x = T.zeros((x_begs.shape[0]+1,x_begs.shape[1]),'float32')
-    new_x = T.set_subtensor(new_x[0:-2,:],x_begs)
-    x_begs = new_x
+    new_x = T.zeros((x_begs_input.shape[0]+1,x_begs_input.shape[1]),'float32')
+    x_begs = T.set_subtensor(new_x[0:-1,:],x_begs_input)#all but not the last row
+  else:
+    x_begs = x_begs_input
   
   # Symbolic description of the result
   # f vstupuje pri kompilaci.... ostatni jako non_sequences... (DOD pridat f jako nonsequence?)
@@ -484,7 +529,7 @@ def BuildTheanoIntegrator(f,doaddstatezeros):
   #result = result[-1,0,-1] #hodnoty v posledni iteraci, prvni hodnote z objfunc (doufejme jediny), posledni diskretizacni bod
 
 
-  xret = {'numsteps_var': k, 'xbegs_var': x_begs, 'results_var': result, 'Tmax_var': Tmax}
+  xret = {'numsteps_var': k, 'xbegs_var': x_begs_input, 'results_var': result, 'Tmax_var': Tmax}
   
   return xret
   
@@ -540,8 +585,8 @@ def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
   result = objcon(integratorresults,u_function,p_params)                       #moznost dat pouze koncovy body uz tady
   #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
   
-  ends = integratorvars['results_var'][:,1:-1] ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
-  begs = integratorvars['xbegs_var'][:,0:-2]
+  begs = integratorvars['xbegs_var'][:,1:]#all but not first item
+  ends = integratorvars['results_var'][0:begs.shape[0],0:-1]  # all but not last item ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
   if (result['eqcon'] == None or len(result['eqcon'])<=0):
     result['eqcon'] = T.flatten(ends-begs)
   else:
@@ -555,6 +600,9 @@ def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
       result['incon'] = result['incon'][0]
     else:
       result['incon'] = T.stack(result['incon'])
+  
+  
+  #result['debug1'] = ends
     
   theanoresult={}
   for key in result:

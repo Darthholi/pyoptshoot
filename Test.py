@@ -47,7 +47,7 @@ def main():
   
   #theano.config.compute_test_value = 'warn' - musi bejt vyplneny - defvalue pro theano tensory
   
-  ParallelizSim = solv.BuildTheanoModel(state,ModelFunkce)
+  #ParallelizSim = solv.BuildTheanoModel(state,ModelFunkce,false)
   
   #Test n1 - funguje paralleliz sim?
   case = {}
@@ -58,15 +58,70 @@ def main():
   case['Tmax']= 10.0 #self.T
   
   #theano.printing.debugprint(ParallelizSim)
+
+
+  ####debug zvetseni matic:   -------------------------------------------------------
+  TrySizing = True
+  if (TrySizing):
+    x0 = [0.0];  # Initial states+1 state for cost variable .. yes it is discretized too...
+    xend = [None]
   
+    tspace = np.linspace(0, 10, 100)
+    x = np.tile(tspace, (1, 1)).astype('float32')  # -> to shape (2,100)
+    trysteps = 1000
+    tmaxconst = 100.0
+
+    """
+    def theano_scanstep(
+        i_step, accum, Index):
+      xad = np.empty([2,1])
+      xad[0,0] = 1
+      xad[1, 0] = 1
+      accum += xad
+      return i_step + 1, T.cast(accum,'float32')
+    """
+    x_begs_input = T.matrix("x_begs")
+
+    """
+    doaddstatezeros = False
+    if (doaddstatezeros):
+      ## new_zers = T.zeros((1,x_begs.shape[1]))
+      ## x_begs = T.unbroadcast(T.concatenate([x_begs,new_zers],axis = 1))
+      # new_x = T.zeros((x_begs_input.shape[0]+1 , x_begs_input.shape[1]), 'float32')
+      new_x = T.zeros((x_begs_input.shape[0] + 1, x_begs_input.shape[1]), 'float32')
+      x_begs = T.set_subtensor(new_x[0:-2, :], x_begs_input)
+      # x_begs = new_x
+    else:
+      x_begs = x_begs_input
+    """
   
+    """
+    pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(x_begs.shape[1])).dimshuffle(1, 0), 'float32')
+    try_result, try_updates = theano.scan(fn=theano_scanstep,
+                                          outputs_info=[T.cast(0, 'int32'), T.cast(x_begs, 'float32')],
+                                          # sequences=
+                                          non_sequences=[pIndex],
+                                          n_steps=trysteps)
+    
+    try_result_ret = try_result[1]
+    """
+    try_result_ret = x_begs_input.shape
   
+    try_objective_call = theano.function(inputs=[In(x_begs_input, name='xbegs')],
+                                         outputs=try_result_ret,  # updates=None,
+                                         on_unused_input='warn'  # u_function for example...
+                                         )
+  
+    toprint = try_objective_call(x)
+    print toprint
+    
+    
   ####debug integratoru:   -------------------------------------------------------
   
   TryScan = False
   if (TryScan):
     x0 = [ 0.0]; # Initial states+1 state for cost variable .. yes it is discretized too...
-    xend=[None]  
+    xend=[None]
     
     tspace = np.linspace(0,10,100)
     x=np.tile(tspace,(1,1)).astype('float32')   #-> to shape (2,100)
@@ -85,9 +140,8 @@ def main():
       t_step =  (tmaxconst / fshape) / trysteps   
       
       #accum - states x (ndisc-1)
-      
       def f( x, t ):
-        dx=[200.0*t[0]]#[100.0*theano.tensor.ones_like(x[0])]#[200.0*x[0]]#,3*x[0]
+        dx=[200.0*t[0]]#,10.0*t[0]]#[100.0*theano.tensor.ones_like(x[0])]#[200.0*x[0]]#,3*x[0]
         return theano.tensor.stack(*dx)    #vraci list[a,b,...] a my ho chceme dat primo jako parametr..
                                  
       k1 = f(accum,Tim_t)                                                   #y'=f(y,t) (vicedim fce...) #aplikuj funkci PO SLOUPCICH
@@ -96,13 +150,23 @@ def main():
       k4 = f(accum + t_step*k3,Tim_t+t_step)
       return i_step+1,T.cast(accum + t_step/6.0 *( k1 + 2*k2 + 2*k3 + k4),'float32')
     
-    x_begs = T.matrix("x_begs")
+    x_begs_input = T.matrix("x_begs")
     
     #try_result = theano_inner_rk4_step(0,x_begs,theano.tensor.arange(x_begs.shape[1]))
     #try_objective_call = theano.function(inputs=[ In(x_begs,name='xbegs')],
     #                          outputs=try_result,#updates=None,
     #                          on_unused_input='warn'          #u_function for example...
     #                          )
+    doaddstatezeros = False
+    if (doaddstatezeros):
+    ## new_zers = T.zeros((1,x_begs.shape[1]))
+    ## x_begs = T.unbroadcast(T.concatenate([x_begs,new_zers],axis = 1))
+      #new_x = T.zeros((x_begs_input.shape[0]+1 , x_begs_input.shape[1]), 'float32')
+      new_x = T.zeros((x_begs_input.shape[0]+1, x_begs_input.shape[1]), 'float32')
+      x_begs = T.set_subtensor(new_x[0:-2,:], x_begs_input)
+      #x_begs = new_x
+    else:
+      x_begs = x_begs_input
     
     pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(x_begs.shape[1])).dimshuffle(1, 0),'float32')
     try_result, try_updates = theano.scan(fn=theano_inner_rk4_step,
@@ -190,7 +254,7 @@ def main():
     plt.plot(tspace, sol[:,1], color='r')
     plt.show() 
     
-  tryclass=True
+  tryclass=False
   if (tryclass):
     OptimSim = solv.SimModel(x0,xend, 
                         stateMax=[np.inf,np.inf],
