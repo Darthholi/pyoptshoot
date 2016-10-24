@@ -267,9 +267,9 @@ class SimModel:
                       )
     #print wL
     #print wU
-    
-    ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,self.laststatesum)#state,ModelFunkce)
-    def ObjFromPacked(self,Inp):
+    self.ParallelizSim = None
+    #ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,self.laststatesum)#state,ModelFunkce)
+    def ObjFromPacked(Inp):
       case=self.UnpackForOptim(Inp)                                                    #1) unpack for optim can be included to theano
       case['k']=self.odeintsteps
       case['Tmax']=self.T
@@ -280,8 +280,12 @@ class SimModel:
       if (printdebug):
         print "x: "+str(case['x'])
         print "u: "+str(case['u'])
+      
+      if (self.ParallelizSim is None):
+        self.ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,
+                                         self.laststatesum)  # state,ModelFunkce)
         
-      computedsim = ParallelizSim(**case)
+      computedsim = self.ParallelizSim(**case)
       #print computedsim['debug1']
       #apply state-control-param path constraints:
       if (self.fpathconstraints != None):                                          #2) apply state constraints can be included to theano...
@@ -309,7 +313,7 @@ class SimModel:
       #apply multiple shooting algorithm constraints
       #already done, parallelized.... computedsim['eqcon'].extend()
     
-    #self.ObjFromPacked = ObjFromPacked
+    self.ObjFromPacked = ObjFromPacked
             
     #v kazdy iteraci optimalizatoru
     #calleval.ObjCall({'x': konkretni hodnota x, 'u': konretni hodnota u, 'k': pocet integracnich iteraci})
@@ -331,7 +335,12 @@ class SimModel:
     else:
       xconstr = () #empty iterable...
 
-    cusescipy = True
+    #paralleliz sim is a theano function. We reset it here, because when called from inside a library pyopt, python.exe crashes
+    #if reset, it builds again (only once) and then does not crash
+    #self.ParallelizSim = None # to compile again inside pyopt.
+    #does not work, ipopt still crashes...
+    
+    cusescipy =True
     if (cusescipy):
       res = scipy.optimize.minimize(fun = calleval.ObjCall,
           x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None, #SLSQP #BFGS #COBYLA
