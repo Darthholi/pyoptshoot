@@ -17,11 +17,13 @@ import scipy as sp
 import theano.tensor as T
 import theano
 from scipy.integrate import odeint
+from scikits.odes import ode
 import scipy.optimize
 import matplotlib.pyplot as plt
 from pyOpt import Optimization
 from pyOpt.pySLSQP import pySLSQP
-#from pyOpt.pyPSQP import pyPSQP
+from pyOpt.pyPSQP import pyPSQP
+from pyOpt.pyALGENCAN import pyALGENCAN
 #http://stackoverflow.com/questions/2883189/calling-matlab-functions-from-python
 ##https://www.python-forum.de/viewtopic.php?t=37839 pyopt64bit
 #http://scicomp.stackexchange.com/questions/83/is-there-a-high-quality-nonlinear-programming-solver-for-python
@@ -212,7 +214,7 @@ class SimModel:
     print self.multipleshootingdim
     print self.ndisc-2
     
-    cstartzeroes = True
+    cstartzeroes = True #set true to set zeroes, set false to set random
     
     controlfrng = None
     if (self.controlfdim>0):
@@ -340,7 +342,15 @@ class SimModel:
     #self.ParallelizSim = None # to compile again inside pyopt.
     #does not work, ipopt still crashes...
     
-    cusescipy =True
+    """
+    #sundials cvode:
+    from scikits.odes import ode
+    solution = ode('cvode', van_der_pol, old_api=False).solve(np.linspace(t0,500,200), y0)
+    solution.
+    """
+    
+    
+    cusescipy =False
     if (cusescipy):
       res = scipy.optimize.minimize(fun = calleval.ObjCall,
           x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None, #SLSQP #BFGS #COBYLA
@@ -384,11 +394,12 @@ class SimModel:
       if (hasincon):
         opt_prob.addConGroup('InCons', len(inconx0), type='i', lower=0.0)
       print opt_prob
-      opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers})
-      #opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
+      #opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers})
+      opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
+      #opt = pyALGENCAN.ALGENCAN(options={'iprint': 12})
       #FSQP(options={'iprint': 3, 'miter': self.maxoptimizers })
-      res = opt(opt_prob, sens_type='FD', disp_opts=True, sens_mode='')
-      # Solve Problem with Optimizer Using Finite Differences
+      res = opt(opt_prob, sens_type='FD', disp_opts=True, sens_mode='',sens_step=1e-4)
+      # Solve Problem with Optimizer Using Finite Difference
       print opt_prob.solution(0)
       print opt_prob.solution(0).opt_inform['text']
       return opt_prob.solution(0)
@@ -548,6 +559,86 @@ def BuildTheanoIntegrator(f,doaddstatezeros):
   #print(power(range(10),4))
 
 """
+def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
+  if (Tmax is None):
+    Tmax = T.scalar("Tmax")
+  if (k is None):
+    k = T.iscalar("k")  # pocet iteraci
+  if (ndim is None):
+    ndim = T.iscalar("ndim")
+  if (ndisc is None):
+    ndisc = T.iscalar("ndisc")
+  #input: we want theano to compute exaclty this: np.transpose(np.tile(np.eye(2, dtype=np.float32), (5, 1, 1)))
+  #or, else, for the costfunction - np.transpose(np.tile(np.eye(3,2),(5,1,1)))
+  #ndim .. +1 for cost function...
+  #to understand - play in console with np.transpose(np.tile(np.eye(3,2),(5,1,1)))[0] ...
+  sensbegs = T.transpose(T.tile(T.eye(ndim+1,ndim, 'float32'), (ndisc, 1, 1)))
+
+  
+  # Symbolic description of the result
+  # f vstupuje pri kompilaci.... ostatni jako non_sequences...
+  # sensbegs.shape[2] = ndisc
+  pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(sensbegs.shape[2])).dimshuffle(1, 0), 'float32')       #is this true for sens?  # DOD
+  result, updates = theano.scan(
+    fn=lambda _i, _accum, _Tmax, _Index, _k: theano_inner_rk4_step(_i, _accum, _Tmax, _Index, _k, f),
+    outputs_info=[0, sensbegs],  # [T.zeros(1,1),x_begs],
+    # sequences=
+    non_sequences=[Tmax, pIndex, T.cast(k, 'float32')],
+    n_steps=k)
+
+  # result [0] = k je pocet iteraci....
+  # result [1] je to co chceme - pole vysledku...
+  result = result[1][-1]  # hodnoty poslednich vysledku
+  # ... z toho chceme to posledni, secteny. Theano si vsimne ze to predtim nepotrebujeme a nebude to ukladat...
+  # ted ma origresult[1] tvar [#pocet iteraci scanu, dimenze funkce,pocet diskretizacnich bodu]
+  # result = result[-1,0,-1] #hodnoty v posledni iteraci, prvni hodnote z objfunc (doufejme jediny), posledni diskretizacni bod
+  
+  
+  xret = {'numsteps_var': k, 'xbegs_var': sensbegs, 'results_var': result, 'Tmax_var': Tmax, 'ndim_var': ndim, 'ndisc_var': ndisc}
+  return xret
+
+
+def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
+  if (Tmax is None):
+    Tmax = T.scalar("Tmax")
+  if (k is None):
+    k = T.iscalar("k")  # pocet iteraci
+  if (ndim is None):
+    ndim = T.iscalar("ndim")
+  if (ndisc is None):
+    ndisc = T.iscalar("ndisc")
+  # input: we want theano to compute exaclty this: np.transpose(np.tile(np.eye(2, dtype=np.float32), (5, 1, 1)))
+  # or, else, for the costfunction - np.transpose(np.tile(np.eye(3,2),(5,1,1)))
+  # ndim .. +1 for cost function...
+  # to understand - play in console with np.transpose(np.tile(np.eye(3,2),(5,1,1)))[0] ...
+  sensbegs = T.transpose(T.tile(T.eye(ndim + 1, ndim, 'float32'), (ndisc, 1, 1)))
+  
+  # Symbolic description of the result
+  # f vstupuje pri kompilaci.... ostatni jako non_sequences...
+  # sensbegs.shape[2] = ndisc
+  pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(sensbegs.shape[2])).dimshuffle(1, 0),
+                  'float32')  # is this true for sens?  # DOD
+  result, updates = theano.scan(
+    fn=lambda _i, _accum, _Tmax, _Index, _k: theano_inner_rk4_step(_i, _accum, _Tmax, _Index, _k, f),
+    outputs_info=[0, sensbegs],  # [T.zeros(1,1),x_begs],
+    # sequences=
+    non_sequences=[Tmax, pIndex, T.cast(k, 'float32')],
+    n_steps=k)
+  
+  # result [0] = k je pocet iteraci....
+  # result [1] je to co chceme - pole vysledku...
+  result = result[1][-1]  # hodnoty poslednich vysledku
+  # ... z toho chceme to posledni, secteny. Theano si vsimne ze to predtim nepotrebujeme a nebude to ukladat...
+  # ted ma origresult[1] tvar [#pocet iteraci scanu, dimenze funkce,pocet diskretizacnich bodu]
+  # result = result[-1,0,-1] #hodnoty v posledni iteraci, prvni hodnote z objfunc (doufejme jediny), posledni diskretizacni bod
+  
+  
+  xret = {'numsteps_var': k, 'xbegs_var': sensbegs, 'results_var': result, 'Tmax_var': Tmax, 'ndim_var': ndim,
+          'ndisc_var': ndisc}
+  return xret
+"""
+
+"""
 -f should be a state function
 -objcon should be a function that gets the final integrated states and outputs:
 ['obj']
@@ -593,6 +684,31 @@ def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
   #result['obj']=result['obj'][-1]#if we put arrays into integratorresults
   result = objcon(integratorresults,u_function,p_params)                       #moznost dat pouze koncovy body uz tady
   #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
+
+  """
+  #sensitivity here
+  #we do not account for starting point being dependent on p or u...
+  def fintegpartialx(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+    listres = # = partial finteg / partial x #f(accum,t[0],u_function,p_params,theano_constarrays)
+    return theano.tensor.stack(*listres) #f does not need to use theano notation, can return [a,b]
+
+  def fintegpartialu(accum, t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+    listres =  # = partial finteg / partial u #f(accum,t[0],u_function,p_params,theano_constarrays)
+    return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
+  def fintegpartialp(accum, t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+    listres =  # = partial finteg / partial p #f(accum,t[0],u_function,p_params,theano_constarrays)
+    return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
+  sensvarsx = BuildTheanoObjSensXIntegrator(fintegpartialx, integratorvars['Tmax'], integratorvars['k'], begs.shape[0], begs.shape[1])
+  sensvarsu = BuildTheanoObjSensUIntegrator(fintegpartialu, integratorvars['Tmax'], integratorvars['k'], begs.shape[0], begs.shape[1])
+  sensvarsu = BuildTheanoObjSensPIntegrator(fintegpartialp, integratorvars['Tmax'], integratorvars['k'], begs.shape[0], begs.shape[1])
+  #objpartialx # = partial objcon / partial integratorvars['results_var'][:,-1]
+  # objpartialu # = partial objcon / partial u_function
+  # objpartialp # = partial objcon / partial p_params
+  result['obj_grad_xbegs'] = objpartialx *    #matrix times vector
+  result['obj_grad_u'] = objpartialu *        #matrix times vector
+  result['obj_grad_p'] = objpartialp *        #matrix times vector
+  #endsensitivity
+  """
   
   begs = integratorvars['xbegs_var'][:,1:]#all but not first item
   ends = integratorvars['results_var'][0:begs.shape[0],0:-1]  # all but not last item ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
@@ -600,6 +716,12 @@ def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
     result['eqcon'] = T.flatten(ends-begs)
   else:
     result['eqcon'] = T.concatenate(result['eqcon'],T.flatten(ends-begs))
+
+  """
+  #dod sensitivities for eqcon will be in the form of vectors
+  begssens = sensvarsx['xbegs_var'][:, 1:]  # all but not first item
+  endssens = sensvarsx['results_var'][0:begssens.shape[0], 0:-1]
+  """
     
   #if the function returns list of matrices for example, we need to make one big vector out of it...
   if (isinstance(result['incon'],list) and len(result['incon'])>=1):
@@ -609,6 +731,7 @@ def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
       result['incon'] = result['incon'][0]
     else:
       result['incon'] = T.stack(result['incon'])
+      
   
   
   #result['debug1'] = ends

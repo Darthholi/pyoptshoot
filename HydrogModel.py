@@ -115,7 +115,7 @@ def main():
         #bc = dataarrays['PowerConditions'][tl] * (t-tl) + dataarrays['PowerConditions'][T.cast(tl+1,'int32')]* (1-t+tl)
         PowerCond = shared(ModelData['PowerConditions'][:,1])
         bc = PowerCond[tl] * (t - tl) + PowerCond[T.cast(tl + 1, 'int32')] * (1 - t + tl)
-        xPWO = bc
+        #xPWO = bc
         ubatt = w[0] * ModelData['ControlScales']
         #if (ubatt >= 0):  # into batt % w(ks,1) = ubatt
         #    xPWO = xPWO - ubatt
@@ -123,11 +123,11 @@ def main():
         #else:
         #    xPWO = xPWO - ubatt
         #    dx[0] = ubatt - ModelData['cBattSigma'] * x[0]
-        xPWO = xPWO - ubatt
+        #xPWO = xPWO - ubatt
         dx[0] = T.switch(T.ge(ubatt,0.0),ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0],  # x1'  for battery
           ubatt - ModelData['cBattSigma'] * x[0])
 
-        ufc = w[0] * ModelData['ControlScales']
+        ufc = w[1] * ModelData['ControlScales']
 
         """if (ufc >= 0):  # into h2 w(ks,2) = ucell    "one empirical model" - electrolyzer
             xPWO = xPWO - ufc * (
@@ -163,8 +163,9 @@ def main():
           ModelData['CellVrev'] + ModelData['CellB'] * T.log(ModelData['Celli0'])
           - ModelData['CellAt'] * T.log(areacurrent) - areacurrent * ModelData['Cellr'] +
           ModelData['Cellm'] * T.exp(areacurrent * ModelData['Celll']))
+
+        xPWO = bc - ubatt - T.switch(T.ge(ufc, 0.0), electrolyzerpwo, fuelcellpwo)
         
-        xPWO = xPWO - T.switch(T.ge(ufc,0.0),electrolyzerpwo,fuelcellpwo)
         dx[1] = T.switch(T.ge(ufc,0.0),ModelData['ElecNumCells'] * ufc * ModelData['ElecFefficiency'],
                        ufc * ModelData['CellNumCell'] * ModelData['CellFInvefficiency'])
         
@@ -204,6 +205,8 @@ def main():
         ret['eqcon'] = []  # other things that need to be equal to zero, comes from problem formulation                                                                      #dod kolik eqs? secist nebo soustavu? soustavu!
         # c = [f(4)-ModelData.Wbattmaxf(5)-ModelData.Wfcmax...
         #    -f(7)-f(8)]' #\leq 0                             #radek ... toto ma byt mensi nez nula
+
+        #inequality constraints - taken care by stateMax, stateMin but not for the last node...
         ret['incon'] = [-sim[0], -sim[1], sim[0] - ModelData['Wbattmax'], sim[1] - ModelData['Wfcmax']]
         return ret
 
@@ -220,7 +223,8 @@ def main():
                       constarrays= None, #constarrays = {'PowerConditions': ModelData['PowerConditions'][:, 1]},
                       fpathconstraints=None,              #others than min max
                       otherparamsMin=None,   #params to optimize, that are not states and not controls...
-                      otherparamsMax=None)
+                      otherparamsMax=None,
+                      T=ModelData['t_end'])
     OptimSim.GenForDiscretization(ndisc=32,maxoptimizers=1000,odeintsteps=1000)
     res=OptimSim.RunOptim()
     OptimSim.DrawResults(res)

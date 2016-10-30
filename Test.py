@@ -61,7 +61,7 @@ def main():
 
 
   ####debug zvetseni matic:   -------------------------------------------------------
-  TrySizing = True
+  TrySizing = False
   if (TrySizing):
     x0 = [0.0];  # Initial states+1 state for cost variable .. yes it is discretized too...
     xend = [None]
@@ -209,10 +209,63 @@ def main():
     #v outputs info musi bejt T.cast(0,'int32'),, jinak to z toho udelat int8 a pretece...
     #vysledek theano.scan je [1000,2] ... ?
     #theano scan na scitani tisici poli 2x10000 vrati pole 1000x2x10000 a my vezmeme tu posledni hodnotu (viz http://deeplearning.net/software/theano/library/scan.html)
-                          
-                                
+
+  TryFun3D = True
+  if (TryFun3D):
+    
+    #2d:
+    # from 0              we make 0 0 0 0 0 0 0 ...
+    #      0                      0 0 0 0 0 0 0 ...
+    #          and we apply f to  ^ ^ ^ ^ ^ ^ ^ ...
+    
+    #now from
+    # .                       1 1 1     0 0 0
+    # .                       0 0 0 ... 1 1 1 ...
+    # we wat to make          [ndisc block] [ndisc block]
+    #                         ^results \partial f / \partial x_1_0
+    #                           ^ \partial f / \partial x_1_1 .... x_1_n
+    #                                   ^ \partial f / \partial x_2_0
+
+    xinp = np.transpose(np.tile(np.eye(2,dtype = np.float32), (5, 1, 1)))
+    
+    # accum - states x (ndisc-1)
+    def f(xin):
+      dx = [2.0 * xin[0],3.0*xin[1]]  # ,10.0*t[0]]#[100.0*theano.tensor.ones_like(x[0])]#[200.0*x[0]]#,3*x[0]
+      return theano.tensor.stack(*dx)  # vraci list[a,b,...] a my ho chceme dat primo jako parametr..
+
+    x_begs_input = T.tensor('float32',(False,False,False),"x_begs")
+
+    try_result = f(x_begs_input) #theano_inner_rk4_step(0,x_begs,theano.tensor.arange(x_begs.shape[1]))
+    try_objective_call = theano.function(inputs=[ In(x_begs_input,name='xbegs')],
+                             outputs=try_result,#updates=None,
+                             on_unused_input='warn'          #u_function for example...
+                             )
+    
+    toprint = try_objective_call(xinp)
+    print xinp.shape
+    print xinp
+    print toprint.shape
+    print toprint
+
+    def f(xin):
+      dx = 2.0 * xin[0]+ 3.0 * xin[1]
+      return dx
   
-  ####end debug integratoru  -------------------------------------------------------- 
+    x_begs_input_2 = T.tensor('float32', (False, False, False), "x_begs")
+  
+    try_result_2 = f(x_begs_input_2)  # theano_inner_rk4_step(0,x_begs,theano.tensor.arange(x_begs.shape[1]))
+    try_objective_call_2 = theano.function(inputs=[In(x_begs_input_2, name='xbegs')],
+                                         outputs=try_result_2,  # updates=None,
+                                         on_unused_input='warn'  # u_function for example...
+                                         )
+  
+    toprint = try_objective_call_2(xinp)
+    print xinp.shape
+    print xinp
+    print toprint.shape
+    print toprint
+
+  ####end debug integratoru  --------------------------------------------------------
   
   tryobj = False
   if (tryobj):
@@ -278,6 +331,6 @@ def main():
    
         
 if __name__ == '__main__':
-    #main()
-    import HydrogModel
-    HydrogModel.main()
+    main()
+    #import HydrogModel
+    #HydrogModel.main()
