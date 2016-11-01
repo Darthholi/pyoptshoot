@@ -20,6 +20,7 @@ import numpy as np
 import scipy as sp
 import theano.tensor as T
 import theano
+import intheanogators as tint
 from scipy.integrate import odeint
 #from scikits.odes import ode
 import scipy.optimize
@@ -48,6 +49,7 @@ class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint
     self.result = None
     self.debugprint = True
     self.iter = 0
+    self.integratorfunc = tint.theano_inner_rk4_step
     
   def FuncCall(self,x):
     if (self.lastx is None or np.any(x != self.lastx)):
@@ -240,12 +242,6 @@ class SimModel:
     self.UnpackForOptim = UnpackForOptim
 
   def BuildTheanoModel(self, f, objcon, constarrays, gensens, sumlastaxis=False):
-  
-    # if (self.controlfdim <= 0):
-    #  def finteg(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-    #    return f(accum,t)
-    #  integratorvars = BuildTheanoIntegrator(finteg)
-    # else:
     u_function = T.matrix("u_function")  # parametrizovana ridici funkce
     p_params = T.vector("p_params")
   
@@ -265,7 +261,7 @@ class SimModel:
       listres = f(accum, t[0], u_function, p_params, theano_constarrays)
       return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
   
-    integratorvars = BuildTheanoIntegrator(finteg, sumlastaxis)
+    integratorvars = BuildTheanoIntegrator(finteg, sumlastaxis, self.integratorfunc)
   
     ##integratorvars['results_var'][:,-1] shoud be "all state variables; at their last point"
     # into this function the objcon goes for all computed path endings to get all possible custom path constraints
@@ -607,6 +603,7 @@ class SimModel:
       def pyoptobj(x):
         fail = 0 #ok
         g = []
+        #in-this-order-we-do-present-the-constraints ... must be the same at each block labelled the same...
         if (eqconx0num>0 and inconx0num>0):
           g=np.concatenate([calleval.EqConCall(x),calleval.InConCall(x)])
         elif (eqconx0num>0):
@@ -622,26 +619,26 @@ class SimModel:
           # - g -> ARRAY: Constraint values
     
           g_obj = self.PackForOptim(
-              np.zeros(self.stateMin.shape),#dod je spravne> mame nekde vubec derivace vuci pochodnotam?
-              calleval.Call(x,'objgrad_x'),
+              calleval.Call(x,'objgrad_x')[:,0],#the gradient is solved against all beginning points of x. The pack for optim function takes first the initial state and then the discretized beginnings
+              calleval.Call(x,'objgrad_x')[:,1:],
               calleval.Call(x,'objgrad_u'),
               calleval.Call(x,'objgrad_p')
                       )
-
+          
+          # in-this-order-we-do-present-the-constraints ... must be the same at each block labelled the same...
           if (eqconx0num>0 or eqconx0num>0):
-            #g_con = np.concatenate([calleval.EqConCall(x), calleval.InConCall(x)])
             g_con = np.empty(eqconx0num+inconx0num, self.PackForOptimSize)
-
           for i in xrange(eqconx0num):
             g_con[i, :] = self.PackForOptim(
-              np.zeros(self.stateMin.shape),  # dod je spravne> mame nekde vubec derivace vuci pochodnotam?
-              calleval.Call(x, 'eqcongrad_x')[i, :],
+              calleval.Call(x, 'eqcongrad_x')[i, 0],
+              calleval.Call(x, 'eqcongrad_x')[i, 1:],
               calleval.Call(x, 'eqcongrad_u')[i, :],
               calleval.Call(x, 'eqcongrad_p')[i, :]
             )
           for i in xrange(inconx0num):
             g_con[i + eqconx0num, :] = self.PackForOptim(
-              np.zeros(self.stateMin.shape),  # dod je spravne> mame nekde vubec derivace vuci pochodnotam?
+              calleval.Call(x, 'incongrad_x')[i, 0],
+              calleval.Call(x, 'incongrad_x')[i, 1:],
               calleval.Call(x, 'incongrad_x')[i, :],
               calleval.Call(x, 'incongrad_u')[i, :],
               calleval.Call(x, 'incongrad_p')[i, :]
@@ -660,7 +657,7 @@ class SimModel:
         opt_prob.addVar('x'+str(i), 'c', lower = wL[i], upper = wU[i], value=x0[i])
       opt_prob.addObj('f')
 
-      if (eqconx0num>0):
+      if (eqconx0num>0): #in-this-order-we-do-present-the-constraints ... must be the same at each block labelled the same...
         opt_prob.addConGroup('EqCons', eqconx0num, type='e', equal=0.0)
       if (inconx0num>0):
         opt_prob.addConGroup('InCons', inconx0num, type='i', lower=0.0)
@@ -740,53 +737,8 @@ class SimModel:
         #dlmwrite('controldata',wopt);
     
 
-
-"""
-def rk4(f, xvinit, Tmax, N):
-  T = np.linspace(0, Tmax, N+1)
-  xv = np.zeros( (len(T), len(xvinit)) )
-  xv[0] = xvinit
-  h = Tmax / N
-  for i in range(N):
-      k1 = f(xv[i])
-      k2 = f(xv[i] + h/2.0*k1)
-      k3 = f(xv[i] + h/2.0*k2)
-      k4 = f(xv[i] + h*k3)
-      xv[i+1] = xv[i] + h/6.0 *( k1 + 2*k2 + 2*k3 + k4)
-  return T, xv
-  
-...
-slsqp...  
-
--beginning states can have bigger dimension than constraints and discretized states- that means that some states are not meant to be discretized
-
-"""
-def theano_inner_rk4_step(#accum:                               #i_step je integer...
-                          i_step,accum,                         #accum je matice - pocet dimenzi vysledny funkce krat pocet bodu ve kterejch integrujeme po krivce
-                          #menici se:                          
-                          #pevny paramtery: 
-                          Tmax, #scalar
-                          Index,#vector
-                          Int_steps_total,
-                          f):
-  #integracni casy: 
-  fshape = T.cast(Index.shape[0],floatUse)
-  Tim_t = Index * Tmax / fshape #vektor (index)0,1,2,3,4,5,6,7,.....  -> vektor (tim_t)0,1/(n*Tmax) .... n/n * Tmax
-  Tim_t = Tim_t+ Tmax*(i_step / (fshape*Int_steps_total))                 #elemwise-posunuto na integracni step ted...
-  #integracni krok:
-  t_step =  (Tmax / fshape) / Int_steps_total        #scalar
-  
-  #accum - states x (ndisc-1)             tzn states x xbegs.shape[1]
-  #Tim_t -                                tzn 1      x xbegs.shape[1]          z theano.tensor.arange(x_begs.shape[1]).dimshuffle(1, 0)                      
-                             
-  k1 = f(accum,Tim_t)                                                   #y'=f(y,t) (vicedim fce...) #aplikuj funkci PO SLOUPCICH
-  k2 = f(accum + t_step*0.5*k1,Tim_t+0.5*t_step)
-  k3 = f(accum + t_step*0.5*k2,Tim_t+0.5*t_step)
-  k4 = f(accum + t_step*k3,Tim_t+t_step)
-  return i_step+1,T.cast(accum + t_step/6.0 *( k1 + 2*k2 + 2*k3 + k4),floatUse)
-  #return i_step+1,T.cast(accum + t_step *f(accum,Tim_t),floatUse)                       #euler
             
-def BuildTheanoIntegrator(f,doaddstatezeros):
+def BuildTheanoIntegrator(f,doaddstatezeros,integratorfunc):
   Tmax = T.scalar("Tmax")
   k = T.iscalar("k")                #pocet iteraci
   x_begs_input = T.matrix("x_begs",floatUse)       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
@@ -804,7 +756,7 @@ def BuildTheanoIntegrator(f,doaddstatezeros):
   # Symbolic description of the result
   # f vstupuje pri kompilaci.... ostatni jako non_sequences... (DOD pridat f jako nonsequence?)
   pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(x_begs.shape[1])).dimshuffle(1, 0),floatUse)
-  result, updates = theano.scan(fn=lambda _i,_accum,_Tmax,_Index,_k :  theano_inner_rk4_step(_i,_accum,_Tmax,_Index,_k,f),
+  result, updates = theano.scan(fn=lambda _i,_accum,_Tmax,_Index,_k :  integratorfunc(_i,_accum,_Tmax,_Index,_k,f),
                                 outputs_info=[0,x_begs],#[T.zeros(1,1),x_begs],
                                 #sequences=
                                 non_sequences=[Tmax,pIndex,T.cast(k,floatUse)],

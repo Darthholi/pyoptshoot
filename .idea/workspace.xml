@@ -3,9 +3,7 @@
   <component name="ChangeListManager">
     <list default="true" id="374c5ddc-fd86-4e41-876f-9e54f35e9f22" name="Default" comment="">
       <change type="MODIFICATION" beforePath="$PROJECT_DIR$/.idea/workspace.xml" afterPath="$PROJECT_DIR$/.idea/workspace.xml" />
-      <change type="MODIFICATION" beforePath="$PROJECT_DIR$/HydrogModel.py" afterPath="$PROJECT_DIR$/HydrogModel.py" />
       <change type="MODIFICATION" beforePath="$PROJECT_DIR$/Solv.py" afterPath="$PROJECT_DIR$/Solv.py" />
-      <change type="MODIFICATION" beforePath="$PROJECT_DIR$/Test.py" afterPath="$PROJECT_DIR$/Test.py" />
     </list>
     <ignored path="Theano.iws" />
     <ignored path=".idea/workspace.xml" />
@@ -38,11 +36,21 @@
       <file leaf-file-name="Solv.py" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/Solv.py">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="-617">
-              <caret line="298" column="49" selection-start-line="298" selection-start-column="49" selection-end-line="298" selection-end-column="49" />
+            <state relative-caret-position="769">
+              <caret line="739" column="12" selection-start-line="739" selection-start-column="12" selection-end-line="739" selection-end-column="12" />
               <folding>
                 <element signature="e#667#678#0" expanded="true" />
               </folding>
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file leaf-file-name="intheanogators.py" pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/intheanogators.py">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="51">
+              <caret line="3" column="25" selection-start-line="3" selection-start-column="4" selection-end-line="3" selection-end-column="25" />
+              <folding />
             </state>
           </provider>
         </entry>
@@ -59,6 +67,13 @@
       </file>
     </leaf>
   </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
@@ -67,6 +82,7 @@
       <list>
         <option value="$PROJECT_DIR$/Test.py" />
         <option value="$PROJECT_DIR$/HydrogModel.py" />
+        <option value="$PROJECT_DIR$/intheanogators.py" />
         <option value="$PROJECT_DIR$/Solv.py" />
       </list>
     </option>
@@ -342,10 +358,18 @@
         </state>
       </provider>
     </entry>
+    <entry file="file://$PROJECT_DIR$/intheanogators.py">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="51">
+          <caret line="3" column="25" selection-start-line="3" selection-start-column="4" selection-end-line="3" selection-end-column="25" />
+          <folding />
+        </state>
+      </provider>
+    </entry>
     <entry file="file://$PROJECT_DIR$/Solv.py">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="-617">
-          <caret line="298" column="49" selection-start-line="298" selection-start-column="49" selection-end-line="298" selection-end-column="49" />
+        <state relative-caret-position="769">
+          <caret line="739" column="12" selection-start-line="739" selection-start-column="12" selection-end-line="739" selection-end-column="12" />
           <folding>
             <element signature="e#667#678#0" expanded="true" />
           </folding>
