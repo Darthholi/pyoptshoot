@@ -331,6 +331,6 @@ def main():
    
         
 if __name__ == '__main__':
-    main()
-    #import HydrogModel
-    #HydrogModel.main()
+    #main()
+    import HydrogModel
+    HydrogModel.main()

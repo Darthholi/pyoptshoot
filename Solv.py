@@ -1,4 +1,8 @@
 """
+todo:
+-sensitivita zatim neni pro self.fpathconstraints, self.fendstate, pro scipy optim minimiz zpusob, pro pocatecni podminky
+-fpathconstraints neotestovano, fendstate neotestovano
+
 -integrator pro kresleni grafu
 -p jako parametry pro optimalizaci nejsou zaneseny dovnitr do funkce a finalnimodelfunkce
 
@@ -17,7 +21,7 @@ import scipy as sp
 import theano.tensor as T
 import theano
 from scipy.integrate import odeint
-from scikits.odes import ode
+#from scikits.odes import ode
 import scipy.optimize
 import matplotlib.pyplot as plt
 from pyOpt import Optimization
@@ -29,8 +33,11 @@ from pyOpt.pyALGENCAN import pyALGENCAN
 #http://scicomp.stackexchange.com/questions/83/is-there-a-high-quality-nonlinear-programming-solver-for-python
 #PSQP SLSQP scipy.optimize.minimize...
 #fsqp nlpqlp commercial
+#for debug:
 #theano.config.optimizer = 'fast_compile' #'None' #'fast_run' #fast compile
 #theano.config.exception_verbosity = 'high'
+
+floatUse = T.config.floatX
 
 class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint and gradients are computed together. IF THE Objective is the first one to call everytime! (#otherwise can check lastx....)
   def __init__(self,
@@ -56,8 +63,12 @@ class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint
     
   def ObjCall(self,x):
     self.FuncCall(x)
-    return float(self.result['obj'])
-    
+    return np.cast(self.result['obj']),floatUse)
+  
+  def Call(self,x,str):
+    self.FuncCall(x)
+    return np.cast(self.result[str]),floatUse)
+  
   def ObjGradCall(self,x):
     self.FuncCall(x)
     return self.result['objgrad']
@@ -80,7 +91,7 @@ class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint
   def InConGradCall(self,x):
     self.FuncCall(x)
     return self.result['incongrad'] 
-    
+  
 
 class SimModel:
   def __init__(self,statebeg,stateend, stateMax,stateMin,controlMax,controlMin,
@@ -90,20 +101,22 @@ class SimModel:
         constarrays = None,
         otherparamsMin=None,   #params to optimize, that are not states and not controls...
         otherparamsMax=None,
-        laststatesum = False,
-        T=1):
+        laststatesum = False,#set true if fodestate returns more dimensions, than there are state equations
+        T=1,
+        gensens = 'ad'):
+    self.gensens = gensens
     self.statebeg = np.array(statebeg)                  #None means IS not fixed...
     self.stateend = np.array(stateend)
     self.laststatesum = laststatesum
     for i in xrange(len(stateMax)):
-      if (stateMax[i]>np.finfo('float32').max/20.0):
-        stateMax[i] = np.finfo('float32').max/20.0
+      if (stateMax[i]>np.finfo(floatUse).max/20.0):
+        stateMax[i] = np.finfo(floatUse).max/20.0
     for i in xrange(len(stateMin)):
-      if (stateMin[i]<-1.0*np.finfo('float32').max/20.0):
-        stateMin[i] = -1.0*np.finfo('float32').max/20.0
+      if (stateMin[i]<-1.0*np.finfo(floatUse).max/20.0):
+        stateMin[i] = -1.0*np.finfo(floatUse).max/20.0
         
-    self.stateMax=np.array(stateMax,dtype = 'float32') #scalary:
-    self.stateMin=np.array(stateMin,dtype = 'float32')
+    self.stateMax=np.array(stateMax,dtype = floatUse) #scalary:
+    self.stateMin=np.array(stateMin,dtype = floatUse)
     self.controlMax=np.array(controlMax)
     self.controlMin=np.array(controlMin)
     self.otherparamsMin=np.array(otherparamsMin)                               #asi ve forme array?? nebo povolime i list?
@@ -154,7 +167,7 @@ class SimModel:
     #
       
     def PackForOptim(xbeg,x,u,p):#uses ndisc    #some xbeg ARE not packed!!
-      packed = np.empty(self.PackForOptimSize,'float32')
+      packed = np.empty(self.PackForOptimSize,floatUse)
       xoffset=0
       for i in range(self.statebeg.shape[0]):
         if (self.statebeg[i] == None):            #if it is NONE then it IS a parameter to be optimized, so pack him
@@ -170,16 +183,39 @@ class SimModel:
         packed[xoffset:] = p[:]
       
       return packed
+
+    """#the same packing function but using theano...
+    def PackForOptimTheano(xbeg, x, u, p):  # uses ndisc    #some xbeg ARE not packed!!
+      packed = T.empty(self.PackForOptimSize, floatUse)
+      xoffset = 0
+      for i in range(self.statebeg.shape[0]):
+        if (self.statebeg[i] == None):  # if it is NONE then it IS a parameter to be optimized, so pack him
+          packed[xoffset] = xbeg[i]
+          xoffset += 1
+  
+      packed[xoffset:(xoffset + self.multipleshootingdim * (self.ndisc - 2))] = T.reshape(x,
+                                                                                           self.multipleshootingdim * (
+                                                                                           self.ndisc - 2))
+      xoffset += self.multipleshootingdim * (self.ndisc - 2)
+      if (self.controlfdim > 0):
+        packed[xoffset:(xoffset + self.controlfdim * (self.ndisc - 1))] = T.reshape(u, self.controlfdim * (self.ndisc - 1))
+        xoffset += self.controlfdim * (self.ndisc - 1)
+      if (p is not None):
+        packed[xoffset:] = p[:]
+  
+      return packed
+      self.PackForOptimTheano = PackForOptimTheano
+    """
           
     self.PackForOptim = PackForOptim
     
     def UnpackForOptim(Packed): #uses ndisc
       ret={} #scipy.optimize.minimize casts to float64.... we ned to cast back for theano
       #if we use f64 then np.empty is not needed for u,p
-      ret['x']=np.empty([self.multipleshootingdim,(ndisc-2)+1],'float32')
-      ret['u']=np.empty([self.controlfdim,ndisc-1],'float32')
+      ret['x']=np.empty([self.multipleshootingdim,(ndisc-2)+1],floatUse)
+      ret['u']=np.empty([self.controlfdim,ndisc-1],floatUse)
       if (len(self.otherparamsMin.shape)>0):
-        ret['p']=np.empty(self.otherparamsMin.shape[0],'float32')
+        ret['p']=np.empty(self.otherparamsMin.shape[0],floatUse)
       else:
         ret['p'] = None
       xoffset=0
@@ -202,6 +238,213 @@ class SimModel:
       return ret
       
     self.UnpackForOptim = UnpackForOptim
+
+  def BuildTheanoModel(self, f, objcon, constarrays, gensens, sumlastaxis=False):
+  
+    # if (self.controlfdim <= 0):
+    #  def finteg(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+    #    return f(accum,t)
+    #  integratorvars = BuildTheanoIntegrator(finteg)
+    # else:
+    u_function = T.matrix("u_function")  # parametrizovana ridici funkce
+    p_params = T.vector("p_params")
+  
+    inputsarray = []
+    theano_constarrays = None
+    if constarrays is not None:
+      if isinstance(constarrays, dict):
+        theano_constarrays = {}
+        for key in constarrays.keys():
+          theano_constarrays[key] = TensorType(floatUse,
+                                               (False,) * len(constarrays[key].shape))  # T.matrix("constarrays_" + key)
+          inputsarray.append(In(theano_constarrays[key], name=key))
+          # else:#error
+  
+    def finteg(accum,
+               t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+      listres = f(accum, t[0], u_function, p_params, theano_constarrays)
+      return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
+  
+    integratorvars = BuildTheanoIntegrator(finteg, sumlastaxis)
+  
+    ##integratorvars['results_var'][:,-1] shoud be "all state variables; at their last point"
+    # into this function the objcon goes for all computed path endings to get all possible custom path constraints
+    # integratorresults = T.zeros([integratorvars['results_var'].shape[0]])
+    integratorresults = integratorvars['results_var'][:, -1]  # should be the last value for each integrato result
+    if (sumlastaxis):
+      # integratorvars['results_var'][-1] = T.elemwise.Sum(integratorvars['results_var'][-1])
+      integratorresults = T.set_subtensor(integratorresults[-1], T.sum(integratorvars['results_var'][-1, :]))
+
+    # result = objcon(integratorvars['results_var'],u_function,p_params)                       #moznost dat pouze koncovy body uz tady
+    ## #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
+    # result['obj']=result['obj'][-1]#if we put arrays into integratorresults
+    origresult = objcon(integratorresults, u_function, p_params)  # moznost dat pouze koncovy body uz tady
+    # objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
+  
+    begs = integratorvars['xbegs_var'][:, 1:]  # all but not first item
+    ends = integratorvars['results_var'][0:begs.shape[0],0:-1]  # all but not last item ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
+    endtrajectory = integratorvars['results_var'][0:begs.shape[0],-1] #only the last item
+    result = {}
+    result['obj'] = origresult['obj']
+
+    # if the function returns list of matrices for example, we need to make one big vector out of it...
+    # result['incon'] = origresult['incon']
+    if (isinstance(origresult['incon'], list) and len(origresult['incon']) >= 1):
+      if len(origresult['incon']) == 1:
+        result['incon'] = T.flatten(origresult['incon'][0])
+      else:
+        tmpstack = []
+        for il in origresult['incon']:
+          tmpstack.append(T.flatten(il))
+        result['incon'] = T.concatenate(tmpstack)
+
+    #constraints-----------------------------------------------------------------------------------------------
+    # apply multiple shooting algorithm constraints
+    # way of less equations: -> sensitivities go into ONE line instead of matrix...
+    multishootingeqcons = T.sum((ends - begs) * (ends - begs))  # should be a scalar .. dotproduct...
+    #way    of    more    equations: T.flatten(ends-begs)
+    if (origresult['eqcon'] == None or len(origresult['eqcon']) <= 0):
+      result['eqcon'] = multishootingeqcons
+    else:
+      result['eqcon'] = T.concatenate(origresult['eqcon'], multishootingeqcons)
+
+    if (self.stateend is None): #is stateend is none, we consider it constrained by normal path constraints. If it is not None, later we will add equality constraints
+      # apply end state constraint - if theree are state-min and state-max, they are automatically applied to ALL beginnings of paths that means also to all endings, but not to the last one, so lets do it:
+      multishootingincons = T.concatenate(T.flatten(endtrajectory - self.stateMin),
+                                          T.flatten(self.stateMax - endtrajectory))  # needs to be >=0
+      if (origresult['incon'] == None or len(origresult['incon']) <= 0):
+        result['incon'] = multishootingeqcons
+      else:
+        result['incon'] = T.concatenate(origresult['incon'], multishootingincons)
+      
+    #todo: add fpathconstraints and stateend
+    """
+    # apply state-control-param path constraints:
+    if (self.fpathconstraints != None):  # 2) apply state constraints can be included to theano...
+      for i in range(self.ndisc - 1):
+        thiscon = self.fpathconstraints(case['x'][:, i], case['u'][:, i], case['p'])
+        if (thiscon['eqcon'] != None):
+          computedsim['eqcon'].extend(thiscon['eqcon'])
+        if (thiscon['incon'] != None):
+          computedsim['incon'].extend(thiscon['incon'])
+    """
+    """
+    # apply finalstate-param constraints:
+    if (self.stateend is not None):
+      if (self.stateend is callable):
+        thiscon = self.stateend(computedsim['x'][:, -1], case['p'])
+      else:  # is a vector of constants that we must target...
+        thiscon = {}
+        thiscon['eqcon'] = []
+        for i in range(self.stateend.shape[0]):
+          if (self.stateend[i] != None):
+            thiscon['eqcon'].append(self.stateend[i] - computedsim['x'][i, -1])
+      if (thiscon['eqcon'] != None and len(thiscon['eqcon']) > 0):
+        computedsim['eqcon'] = np.append(computedsim['eqcon'],
+                                         thiscon['eqcon'])  # computedsim['eqcon'].extend(thiscon['eqcon'])
+      # if (thiscon['incon'] != None and len(thiscon['incon'])>0):
+      #  computedsim['incon'] = np.append(computedsim['incon'],thiscon['eqcon']) #computedsim['incon'].extend(thiscon['incon'])
+    """
+  
+    """
+    #dod sensitivities for eqcon will be in the form of vectors
+    begssens = sensvarsx['xbegs_var'][:, 1:]  # all but not first item
+    endssens = sensvarsx['results_var'][0:begssens.shape[0], 0:-1]
+    """
+  
+    if (gensens == 'ad'):
+      result['objgrad_x'] = T.grad(result['obj'], integratorvars['xbegs_var'])  # vector
+      result['objgrad_u'] = T.grad(result['obj'], u_function)  # vector
+      result['objgrad_p'] = T.grad(result['obj'], p_params, disconnected_inputs='ignore')  # vector
+
+      # matrices we want [i,j] di/dj
+      if (result['eqcon'] is not None):
+        result['eqcongrad_x'] = T.jacobian(result['eqcon'], integratorvars['xbegs_var'])
+        result['eqcongrad_u'] = T.jacobian(result['eqcon'], u_function)
+        result['eqcongrad_p'] = T.jacobian(result['eqcon'], p_params, disconnected_inputs='ignore')
+    
+      if (result['incon'] is not None):
+        result['incongrad_x'] = T.jacobian(result['incon'], integratorvars['xbegs_var'])
+        result['incongrad_u'] = T.jacobian(result['incon'], u_function)
+        result['incongrad_p'] = T.jacobian(result['incon'], p_params, disconnected_inputs='ignore')
+  
+    """
+    if (self.gensens == 'sens' ):
+      # sensitivity here #dod overit ze d+1 jsou na spravnym miste...
+      # we do not account for starting point being dependent on p or u...
+      def fintegpartialx(accum,t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+        listres =  T.gradient.jacobian(finteg,x) # = partial finteg / partial x ... matrix d x d+1 .... #f(accum,t[0],u_function,p_params,theano_constarrays)
+        return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
+
+      def fintegpartialu(accum,t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+        listres =  # = partial finteg / partial u #f(accum,t[0],u_function,p_params,theano_constarrays)
+        return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
+
+      def fintegpartialp(accum,t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+        listres =  # = partial finteg / partial p #f(accum,t[0],u_function,p_params,theano_constarrays)
+        return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
+
+      #sens: (dim x dim+1 x ndisc) #+1 for 'additional state for cost'  # poradi v druhym nasobiteli? dod
+      #if we set it like this, then it means that sensvar[i,j,n] is a sensitivity of state[j] against change in [i]
+      #(if dim+1 is somewhere else than in the middle, change from now on)
+
+      sensvarsx = BuildTheanoObjSensXIntegrator(fintegpartialx, integratorvars['Tmax'], integratorvars['k'],
+                                                begs.shape[0], begs.shape[1])
+      sensvarsu = BuildTheanoObjSensUIntegrator(fintegpartialu, integratorvars['Tmax'], integratorvars['k'],
+                                                begs.shape[0], begs.shape[1])
+      sensvarsu = BuildTheanoObjSensPIntegrator(fintegpartialp, integratorvars['Tmax'], integratorvars['k'],
+                                                begs.shape[0], begs.shape[1])
+      objpartialx = T.grad(objcon(integratorresults,u_function,p_params),integratorvars['results_var']) # = partial objcon / partial integratorvars['results_var'][:,-1]
+      # objpartialu # = partial objcon / partial u_function
+      # objpartialp # = partial objcon / partial p_params
+      #chain rule - derivative at integrated point times derivative of parameters...
+      obj_grad_xbegs = objpartialx(integratorresults, u_function, p_params) *  # matrix times vector
+      obj_grad_u = objpartialu(integratorresults, u_function, p_params) *  # matrix times vector
+      obj_grad_p = objpartialp(integratorresults, u_function, p_params) *  # matrix times vector
+      # eqsensitivity:
+
+      #derivative at integrated point times
+      #matice (dim x ndisc) * ( dim x dim+1 x ndisc) #poradi v druhym nasobiteli? dod
+      #for differentiating inner "ends":
+      #for each ndisc we want to
+      #(end-beg)[d]*sens[j,d] for each d sum against j
+      #together it is (end-beg)[d,n]*sens[j,d,n] sum over d, vector over j x n (grads of jth component )
+      #2* T.sum(T.tensordot(ends - begs,sensvarsx['results_var'][:,  0:begs.shape[0],0:-1], [[0,1],[1,2]] )) #poradi indexu? DOD
+      #for differentiating inner "-begs":
+      #begs do have a structure - it is sensvarsx['xbegs_var'] and they are identity matrixes x ndisc times repeated
+      #dont forget that the begs are baing indexed the same way as 'begs' upper:
+      #2* -T.sum(T.tensordot(ends - begs,sensvarsx['xbegs_var'][:,  1:,0:-1], [[0,1],[1,2]] )) #poradi indexu? DOD
+      chaininnereqcon = sensvarsx['results_var'][:, 0:begs.shape[0], 0:-1] - sensvarsx['xbegs_var'][:, 1:, 0:-1]
+      eqgrad = 2.0*(
+        T.tensordot(ends - begs, chaininnereqcon, [[0], [1]]) )
+      #this is a vector of gradients of the multipleshooting eq-constraint equation, should now have the length of ndisc-1
+
+      #zbejva reagovat na result'incon'
+    """
+  
+    theanoresult = {}
+    for key in result:
+      if (result[key] is not None):
+        theanoresult[key] = result[key]  # Out(variable = result[key])#, name = key) variant #2
+  
+    inputsarray = [In(integratorvars['xbegs_var'], name='x'),
+                   In(u_function, name='u'),
+                   In(p_params, name='p'),
+                   In(integratorvars['numsteps_var'], name='k'),
+                   In(integratorvars['Tmax_var'], name='Tmax')] + inputsarray
+  
+    theano.config.on_unused_input = 'warn'
+    objective_call = theano.function(inputs=inputsarray,
+                                     outputs=theanoresult,  # updates=None,
+                                     allow_input_downcast=True,  # todo try false and see where the downcast originates.
+                                     on_unused_input='warn'  # u_function for example...
+                                     )  # http://deeplearning.net/software/theano/library/compile/io.html
+    # f a list of Variable or Out instances is given as argument, then the compiled function will return a list of their values.
+
+    # def rtnf(x,u,p,k,Tmax):
+    #  return objective_call(x=T.cast(x,floatUse),u=T.cast(u,floatUse),p=T.cast(p,floatUse),k=k,Tmax=T.cast(Tmax,floatUse))
+  
+    return objective_call
     
   def RunOptim(self):
   
@@ -218,10 +461,10 @@ class SimModel:
     
     controlfrng = None
     if (self.controlfdim>0):
-      controlfrng = np.empty([self.controlfdim, self.ndisc - 1], 'float32')
+      controlfrng = np.empty([self.controlfdim, self.ndisc - 1], floatUse)
       for i in xrange(self.controlfdim):
         controlfrng[i,:] = np.zeros((1,self.ndisc-1)) if cstartzeroes else np.random.uniform(low=self.controlMin[i], high=self.controlMax[i],size=(1,self.ndisc-1))
-    randinitx = np.empty([self.multipleshootingdim,self.ndisc-2],'float32')  
+    randinitx = np.empty([self.multipleshootingdim,self.ndisc-2],floatUse)
     for i in xrange(self.multipleshootingdim):
       randinitx[i,:] = np.zeros((1,self.ndisc-2)) if cstartzeroes else np.random.uniform(low=self.stateMin[i], high=self.stateMax[i], size=(1,self.ndisc-2))
     otherparamsinit = None
@@ -234,7 +477,7 @@ class SimModel:
                       otherparamsinit
                       )
     
-    wlinitx = np.empty([self.multipleshootingdim,self.ndisc-2],'float32')
+    wlinitx = np.empty([self.multipleshootingdim,self.ndisc-2],floatUse)
     for i in xrange(self.multipleshootingdim):
       wlinitx[i,:] = self.stateMin[i]
     otherparamsminp = None
@@ -242,7 +485,7 @@ class SimModel:
       otherparamsminp = self.otherparamsMin
     controlfwl = None
     if (self.controlfdim > 0):
-      controlfwl = np.empty([self.controlfdim, self.ndisc - 1], 'float32')
+      controlfwl = np.empty([self.controlfdim, self.ndisc - 1], floatUse)
       for i in xrange(self.controlfdim):
         controlfwl[i, :] = self.controlMin[i]
     wL = self.PackForOptim(self.stateMin,
@@ -251,7 +494,7 @@ class SimModel:
                       otherparamsminp
                       )
     
-    wuinitx = np.empty([self.multipleshootingdim,self.ndisc-2],'float32')
+    wuinitx = np.empty([self.multipleshootingdim,self.ndisc-2],floatUse)
     for i in xrange(self.multipleshootingdim):
       wuinitx[i,:] = self.stateMax[i]
     otherparamsmaxp = None   
@@ -259,7 +502,7 @@ class SimModel:
       otherparamsmaxp = self.otherparamsMax
     controlfwu = None
     if (self.controlfdim > 0):
-      controlfwu = np.empty([self.controlfdim, self.ndisc - 1], 'float32')
+      controlfwu = np.empty([self.controlfdim, self.ndisc - 1], floatUse)
       for i in xrange(self.controlfdim):
         controlfwu[i, :] = self.controlMax[i]
     wU = self.PackForOptim(self.stateMax,
@@ -270,7 +513,6 @@ class SimModel:
     #print wL
     #print wU
     self.ParallelizSim = None
-    #ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,self.laststatesum)#state,ModelFunkce)
     def ObjFromPacked(Inp):
       case=self.UnpackForOptim(Inp)                                                    #1) unpack for optim can be included to theano
       case['k']=self.odeintsteps
@@ -284,36 +526,10 @@ class SimModel:
         print "u: "+str(case['u'])
       
       if (self.ParallelizSim is None):
-        self.ParallelizSim = BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays,
+        self.ParallelizSim = self.BuildTheanoModel(self.fodestate, self.ffinalobjcon, self.constarrays, self.gensens,
                                          self.laststatesum)  # state,ModelFunkce)
         
       computedsim = self.ParallelizSim(**case)
-      #print computedsim['debug1']
-      #apply state-control-param path constraints:
-      if (self.fpathconstraints != None):                                          #2) apply state constraints can be included to theano...
-        for i in range(self.ndisc-1):
-          thiscon = self.fpathconstraints(case['x'][:,i],case['u'][:,i],case['p'])
-          if (thiscon['eqcon'] != None):
-            computedsim['eqcon'].extend(thiscon['eqcon'])
-          if (thiscon['incon'] != None):
-            computedsim['incon'].extend(thiscon['incon'])
-      #apply finalstate-param constraints:
-      if (self.stateend is not None):
-        if (self.stateend is callable):
-          thiscon = self.stateend(computedsim['x'][:,-1],case['p'])
-        else:    #is a vector of constants that we must target...
-          thiscon = {}
-          thiscon['eqcon']=[]
-          for i in range(self.stateend.shape[0]):
-            if (self.stateend[i] != None):
-              thiscon['eqcon'].append(self.stateend[i]-computedsim['x'][i,-1])
-        if (thiscon['eqcon'] != None and len(thiscon['eqcon'])>0):
-          computedsim['eqcon'] = np.append(computedsim['eqcon'],thiscon['eqcon']) #computedsim['eqcon'].extend(thiscon['eqcon'])
-        #if (thiscon['incon'] != None and len(thiscon['incon'])>0):
-        #  computedsim['incon'] = np.append(computedsim['incon'],thiscon['eqcon']) #computedsim['incon'].extend(thiscon['incon'])
-        return computedsim
-      #apply multiple shooting algorithm constraints
-      #already done, parallelized.... computedsim['eqcon'].extend()
     
     self.ObjFromPacked = ObjFromPacked
             
@@ -326,16 +542,21 @@ class SimModel:
     print "obj at wL "+str(calleval.ObjCall(wL))
     eqconx0 = calleval.EqConCall(x0)
     inconx0 = calleval.InConCall(x0)
-    haseqcon = (eqconx0 is not None)
-    hasincon = (inconx0 is not None)
-    if (haseqcon or hasincon):
-      xconstr = []
-      if (haseqcon):
-        xconstr.append({'type': 'eq', 'fun': calleval.EqConCall})
-      if (hasincon):
-        xconstr.append( {'type': 'ineq', 'fun': calleval.InConCall})#inequality means that it is to be non-negative
+    if (eqconx0 is not None):
+      if (len(eqconx0.shape)<=0):
+        eqconx0num = 1
+      else:
+        eqconx0num = len(eqconx0)
     else:
-      xconstr = () #empty iterable...
+      eqconx0num = 0
+     
+    if (inconx0 is not None):
+      if (len(inconx0.shape)<=0):
+        inconx0num = 1
+      else:
+        inconx0num = len(inconx0)
+    else:
+        inconx0num = 0
 
     #paralleliz sim is a theano function. We reset it here, because when called from inside a library pyopt, python.exe crashes
     #if reset, it builds again (only once) and then does not crash
@@ -352,6 +573,16 @@ class SimModel:
     
     cusescipy =False
     if (cusescipy):
+      #todo sensitivities
+      if (eqconx0num>0 or eqconx0num>0):
+        xconstr = []
+        if (eqconx0num>0):
+          xconstr.append({'type': 'eq', 'fun': calleval.EqConCall})
+        if (inconx0num>0):
+          xconstr.append({'type': 'ineq', 'fun': calleval.InConCall})  # inequality means that it is to be non-negative
+      else:
+        xconstr = ()  # empty iterable...
+        
       res = scipy.optimize.minimize(fun = calleval.ObjCall,
           x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None, #SLSQP #BFGS #COBYLA
           bounds=zip(wL,wU),     #dod je zip spravne?
@@ -376,33 +607,74 @@ class SimModel:
       def pyoptobj(x):
         fail = 0 #ok
         g = []
-        if (haseqcon and hasincon):
+        if (eqconx0num>0 and inconx0num>0):
           g=np.concatenate([calleval.EqConCall(x),calleval.InConCall(x)])
-        elif (haseqcon):
+        elif (eqconx0num>0):
           g = calleval.EqConCall(x)
-        elif (hasincon):
+        elif (inconx0num>0):
           g = calleval.InConCall(x)
         return calleval.ObjCall(x),g,fail
+
+      if (self.gensens is not None):
+        def pyoptgrad(x, f, g):
+          #- x -> ARRAY: Design variables
+          # - f -> ARRAY: Objective values
+          # - g -> ARRAY: Constraint values
+    
+          g_obj = self.PackForOptim(
+              np.zeros(self.stateMin.shape),#dod je spravne> mame nekde vubec derivace vuci pochodnotam?
+              calleval.Call(x,'objgrad_x'),
+              calleval.Call(x,'objgrad_u'),
+              calleval.Call(x,'objgrad_p')
+                      )
+
+          if (eqconx0num>0 or eqconx0num>0):
+            #g_con = np.concatenate([calleval.EqConCall(x), calleval.InConCall(x)])
+            g_con = np.empty(eqconx0num+inconx0num, self.PackForOptimSize)
+
+          for i in xrange(eqconx0num):
+            g_con[i, :] = self.PackForOptim(
+              np.zeros(self.stateMin.shape),  # dod je spravne> mame nekde vubec derivace vuci pochodnotam?
+              calleval.Call(x, 'eqcongrad_x')[i, :],
+              calleval.Call(x, 'eqcongrad_u')[i, :],
+              calleval.Call(x, 'eqcongrad_p')[i, :]
+            )
+          for i in xrange(inconx0num):
+            g_con[i + eqconx0num, :] = self.PackForOptim(
+              np.zeros(self.stateMin.shape),  # dod je spravne> mame nekde vubec derivace vuci pochodnotam?
+              calleval.Call(x, 'incongrad_x')[i, :],
+              calleval.Call(x, 'incongrad_u')[i, :],
+              calleval.Call(x, 'incongrad_p')[i, :]
+            )
+          fail = 0
+          return g_obj, g_con, fail
+          #needs return g_obj vector
+          #gcon - 2D array - [derivative of which con][over which x]
+  
+        sens_type = pyoptgrad
+      else:
+        sens_type = 'FD'
       
       opt_prob = Optimization('Multipleshooting', pyoptobj)
       for i in xrange(len(x0)):
         opt_prob.addVar('x'+str(i), 'c', lower = wL[i], upper = wU[i], value=x0[i])
       opt_prob.addObj('f')
 
-      if (haseqcon):
-        opt_prob.addConGroup('EqCons', len(eqconx0), type='e', equal=0.0)
-      if (hasincon):
-        opt_prob.addConGroup('InCons', len(inconx0), type='i', lower=0.0)
+      if (eqconx0num>0):
+        opt_prob.addConGroup('EqCons', eqconx0num, type='e', equal=0.0)
+      if (inconx0num>0):
+        opt_prob.addConGroup('InCons', inconx0num, type='i', lower=0.0)
       print opt_prob
       #opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers})
       opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
       #opt = pyALGENCAN.ALGENCAN(options={'iprint': 12})
       #FSQP(options={'iprint': 3, 'miter': self.maxoptimizers })
-      res = opt(opt_prob, sens_type='FD', disp_opts=True, sens_mode='',sens_step=1e-4)
+      res = opt(opt_prob, sens_type=sens_type, disp_opts=True, sens_mode='',sens_step=1e-4)
       # Solve Problem with Optimizer Using Finite Difference
       print opt_prob.solution(0)
       print opt_prob.solution(0).opt_inform['text']
-      return opt_prob.solution(0)
+      found = self.UnpackForOptim(opt_prob.solution(0).parameters)
+      return found
     
   def DrawResults(self,Sim):
     #-------------------------------------
@@ -419,11 +691,11 @@ class SimModel:
     tspace= np.linspace(0,Tmax,100)
 
     theano.config.on_unused_input = 'warn'
-    sym_x = T.vector('x', 'float32')
-    sym_t = T.scalar('t', 'float32')
-    sym_p = T.matrix('p', 'float32')
-    sym_w = T.vector('w', 'float32')
-    sym_dataarrays = T.matrix('dataarrays', 'float32')
+    sym_x = T.vector('x', floatUse)
+    sym_t = T.scalar('t', floatUse)
+    sym_p = T.matrix('p', floatUse)
+    sym_w = T.vector('w', floatUse)
+    sym_dataarrays = T.matrix('dataarrays', floatUse)
     onestateresult = self.fodestate(sym_x, sym_t, sym_w, sym_p, sym_dataarrays) #fodestate is defined as theano function ... so lets make python function from it
     state_call = theano.function(inputs=[In(sym_x, name='x'),
                                          In(sym_t, name='t'),
@@ -435,12 +707,12 @@ class SimModel:
                                  on_unused_input='warn'
                                  )
     
-    trycall = state_call( init.astype(np.float32), np.array(0.0).astype(np.float32), Sim['u'][:,0].astype(np.float32), Sim['p'].astype(np.float32) if Sim['p'] is not None else None, self.constarrays.astype(np.float32) if self.constarrays is not None else None)
+    #trycall = state_call( init.astype(np.float32), np.array(0.0).astype(np.float32), Sim['u'][:,0].astype(np.float32), Sim['p'].astype(np.float32) if Sim['p'] is not None else None, self.constarrays.astype(np.float32) if self.constarrays is not None else None)
     
     def integstate(x,t):
       u=Sim['u'][:,int(np.floor(t/Tmax))]
       #return np.array(self.fodestate(x,t,u,Sim['p'],self.constarrays))
-      return np.array(state_call( x.astype(np.float32), np.array(t,dtype=np.float32), u.astype(np.float32), Sim['p'].astype(np.float32) if Sim['p'] is not None else None, self.constarrays.astype(np.float32) if self.constarrays is not None else None))[0:init.shape[0]]
+      return np.array(state_call( np.cast(x,floatUse), np.array(t,floatUse), np.cast(u,floatUse), np.cast(Sim['p'],floatUse) if Sim['p'] is not None else None, np.cast(self.constarrays,floatUse) if self.constarrays is not None else None))[0:init.shape[0]]
      
     #spojite: 
     sol=odeint(integstate, np.array(init), tspace)
@@ -498,7 +770,7 @@ def theano_inner_rk4_step(#accum:                               #i_step je integ
                           Int_steps_total,
                           f):
   #integracni casy: 
-  fshape = T.cast(Index.shape[0],'float32')      
+  fshape = T.cast(Index.shape[0],floatUse)
   Tim_t = Index * Tmax / fshape #vektor (index)0,1,2,3,4,5,6,7,.....  -> vektor (tim_t)0,1/(n*Tmax) .... n/n * Tmax
   Tim_t = Tim_t+ Tmax*(i_step / (fshape*Int_steps_total))                 #elemwise-posunuto na integracni step ted...
   #integracni krok:
@@ -511,31 +783,31 @@ def theano_inner_rk4_step(#accum:                               #i_step je integ
   k2 = f(accum + t_step*0.5*k1,Tim_t+0.5*t_step)
   k3 = f(accum + t_step*0.5*k2,Tim_t+0.5*t_step)
   k4 = f(accum + t_step*k3,Tim_t+t_step)
-  return i_step+1,T.cast(accum + t_step/6.0 *( k1 + 2*k2 + 2*k3 + k4),'float32')
-  #return i_step+1,T.cast(accum + t_step *f(accum,Tim_t),'float32')                       #euler
+  return i_step+1,T.cast(accum + t_step/6.0 *( k1 + 2*k2 + 2*k3 + k4),floatUse)
+  #return i_step+1,T.cast(accum + t_step *f(accum,Tim_t),floatUse)                       #euler
             
 def BuildTheanoIntegrator(f,doaddstatezeros):
   Tmax = T.scalar("Tmax")
   k = T.iscalar("k")                #pocet iteraci
-  x_begs_input = T.matrix("x_begs",'float32')       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
+  x_begs_input = T.matrix("x_begs",floatUse)       #zacatky vsech integracnich mist...  (vicedim funkce, proto matice) --------parametr
   #u_function = T.matrix("u_function")   #parametrizovana ridici funkce                                      --------parametr
   #f = definovanatheano expression
   
   if (doaddstatezeros):
     # new_zers = T.zeros((1,x_begs.shape[1]))
     # x_begs = T.unbroadcast(T.concatenate([x_begs,new_zers],axis = 1))
-    new_x = T.zeros((x_begs_input.shape[0]+1,x_begs_input.shape[1]),'float32')
+    new_x = T.zeros((x_begs_input.shape[0]+1,x_begs_input.shape[1]),floatUse)
     x_begs = T.set_subtensor(new_x[0:-1,:],x_begs_input)#all but not the last row
   else:
     x_begs = x_begs_input
   
   # Symbolic description of the result
   # f vstupuje pri kompilaci.... ostatni jako non_sequences... (DOD pridat f jako nonsequence?)
-  pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(x_begs.shape[1])).dimshuffle(1, 0),'float32')
+  pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(x_begs.shape[1])).dimshuffle(1, 0),floatUse)
   result, updates = theano.scan(fn=lambda _i,_accum,_Tmax,_Index,_k :  theano_inner_rk4_step(_i,_accum,_Tmax,_Index,_k,f),
                                 outputs_info=[0,x_begs],#[T.zeros(1,1),x_begs],
                                 #sequences=
-                                non_sequences=[Tmax,pIndex,T.cast(k,'float32')],
+                                non_sequences=[Tmax,pIndex,T.cast(k,floatUse)],
                                 n_steps=k)
   
   # We only care about A**k, but scan has provided us with A**1 through A**k.
@@ -559,7 +831,7 @@ def BuildTheanoIntegrator(f,doaddstatezeros):
   #print(power(range(10),4))
 
 """
-def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
+def BuildTheanoSensStateIntegrator(f, Tmax, k, ndim, ndisc):
   if (Tmax is None):
     Tmax = T.scalar("Tmax")
   if (k is None):
@@ -572,18 +844,18 @@ def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
   #or, else, for the costfunction - np.transpose(np.tile(np.eye(3,2),(5,1,1)))
   #ndim .. +1 for cost function...
   #to understand - play in console with np.transpose(np.tile(np.eye(3,2),(5,1,1)))[0] ...
-  sensbegs = T.transpose(T.tile(T.eye(ndim+1,ndim, 'float32'), (ndisc, 1, 1)))
+  sensbegs = T.transpose(T.tile(T.eye(ndim+1,ndim, floatUse), (ndisc, 1, 1)))
 
   
   # Symbolic description of the result
   # f vstupuje pri kompilaci.... ostatni jako non_sequences...
   # sensbegs.shape[2] = ndisc
-  pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(sensbegs.shape[2])).dimshuffle(1, 0), 'float32')       #is this true for sens?  # DOD
+  pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(sensbegs.shape[2])).dimshuffle(1, 0), floatUse)       #is this true for sens?  # DOD
   result, updates = theano.scan(
     fn=lambda _i, _accum, _Tmax, _Index, _k: theano_inner_rk4_step(_i, _accum, _Tmax, _Index, _k, f),
     outputs_info=[0, sensbegs],  # [T.zeros(1,1),x_begs],
     # sequences=
-    non_sequences=[Tmax, pIndex, T.cast(k, 'float32')],
+    non_sequences=[Tmax, pIndex, T.cast(k, floatUse)],
     n_steps=k)
 
   # result [0] = k je pocet iteraci....
@@ -596,8 +868,8 @@ def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
   
   xret = {'numsteps_var': k, 'xbegs_var': sensbegs, 'results_var': result, 'Tmax_var': Tmax, 'ndim_var': ndim, 'ndisc_var': ndisc}
   return xret
-
-
+"""
+"""
 def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
   if (Tmax is None):
     Tmax = T.scalar("Tmax")
@@ -611,18 +883,18 @@ def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
   # or, else, for the costfunction - np.transpose(np.tile(np.eye(3,2),(5,1,1)))
   # ndim .. +1 for cost function...
   # to understand - play in console with np.transpose(np.tile(np.eye(3,2),(5,1,1)))[0] ...
-  sensbegs = T.transpose(T.tile(T.eye(ndim + 1, ndim, 'float32'), (ndisc, 1, 1)))
+  sensbegs = T.transpose(T.tile(T.eye(ndim + 1, ndim, floatUse), (ndisc, 1, 1)))
   
   # Symbolic description of the result
   # f vstupuje pri kompilaci.... ostatni jako non_sequences...
   # sensbegs.shape[2] = ndisc
   pIndex = T.cast(theano.tensor.stack(theano.tensor.arange(sensbegs.shape[2])).dimshuffle(1, 0),
-                  'float32')  # is this true for sens?  # DOD
+                  floatUse)  # is this true for sens?  # DOD
   result, updates = theano.scan(
     fn=lambda _i, _accum, _Tmax, _Index, _k: theano_inner_rk4_step(_i, _accum, _Tmax, _Index, _k, f),
     outputs_info=[0, sensbegs],  # [T.zeros(1,1),x_begs],
     # sequences=
-    non_sequences=[Tmax, pIndex, T.cast(k, 'float32')],
+    non_sequences=[Tmax, pIndex, T.cast(k, floatUse)],
     n_steps=k)
   
   # result [0] = k je pocet iteraci....
@@ -638,134 +910,37 @@ def BuildTheanoObjSensXIntegrator(f, Tmax, k, ndim, ndisc):
   return xret
 """
 
+
 """
--f should be a state function
--objcon should be a function that gets the final integrated states and outputs:
-['obj']
-['eqcon']
-['ineqcon']
-"""
-  
-def BuildTheanoModel(f,objcon,constarrays,sumlastaxis=False):
-
-  #if (self.controlfdim <= 0):
-  #  def finteg(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-  #    return f(accum,t)
-  #  integratorvars = BuildTheanoIntegrator(finteg)
-  #else:
-  u_function = T.matrix("u_function")   #parametrizovana ridici funkce
-  p_params = T.vector("p_params")
-
-  inputsarray = []
-  theano_constarrays = None
-  if constarrays is not None:
-    if isinstance(constarrays, dict):
-      theano_constarrays = {}
-      for key in constarrays.keys():
-        theano_constarrays[key] = TensorType('float32', (False,)*len(constarrays[key].shape))#T.matrix("constarrays_" + key)
-        inputsarray.append(In(theano_constarrays[key], name=key))
-        # else:#error
-  
-  def finteg(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-    listres = f(accum,t[0],u_function,p_params,theano_constarrays)
-    return theano.tensor.stack(*listres) #f does not need to use theano notation, can return [a,b]
-  integratorvars = BuildTheanoIntegrator(finteg,sumlastaxis)
-
-  ##integratorvars['results_var'][:,-1] shoud be "all state variables; at their last point"
-  #into this function the objcon goes for all computed path endings to get all possible custom path constraints
-  #integratorresults = T.zeros([integratorvars['results_var'].shape[0]])
-  integratorresults = integratorvars['results_var'][:,-1] #should be the last value for each integrato result
-  if (sumlastaxis):
-    #integratorvars['results_var'][-1] = T.elemwise.Sum(integratorvars['results_var'][-1])
-    integratorresults = T.set_subtensor(integratorresults[-1], T.sum(integratorvars['results_var'][-1,:]))
-  
-  #result = objcon(integratorvars['results_var'],u_function,p_params)                       #moznost dat pouze koncovy body uz tady
-  ## #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
-  #result['obj']=result['obj'][-1]#if we put arrays into integratorresults
-  result = objcon(integratorresults,u_function,p_params)                       #moznost dat pouze koncovy body uz tady
-  #objective function must be evaluated & we do consider objective function at the last point. (multipleshooting says that the continuity is handled by the beginnings-endings of path)
-
-  """
-  #sensitivity here
-  #we do not account for starting point being dependent on p or u...
-  def fintegpartialx(accum,t):            #integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-    listres = # = partial finteg / partial x #f(accum,t[0],u_function,p_params,theano_constarrays)
-    return theano.tensor.stack(*listres) #f does not need to use theano notation, can return [a,b]
-
-  def fintegpartialu(accum, t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-    listres =  # = partial finteg / partial u #f(accum,t[0],u_function,p_params,theano_constarrays)
-    return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
-  def fintegpartialp(accum, t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
-    listres =  # = partial finteg / partial p #f(accum,t[0],u_function,p_params,theano_constarrays)
-    return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
-  sensvarsx = BuildTheanoObjSensXIntegrator(fintegpartialx, integratorvars['Tmax'], integratorvars['k'], begs.shape[0], begs.shape[1])
-  sensvarsu = BuildTheanoObjSensUIntegrator(fintegpartialu, integratorvars['Tmax'], integratorvars['k'], begs.shape[0], begs.shape[1])
-  sensvarsu = BuildTheanoObjSensPIntegrator(fintegpartialp, integratorvars['Tmax'], integratorvars['k'], begs.shape[0], begs.shape[1])
-  #objpartialx # = partial objcon / partial integratorvars['results_var'][:,-1]
-  # objpartialu # = partial objcon / partial u_function
-  # objpartialp # = partial objcon / partial p_params
-  result['obj_grad_xbegs'] = objpartialx *    #matrix times vector
-  result['obj_grad_u'] = objpartialu *        #matrix times vector
-  result['obj_grad_p'] = objpartialp *        #matrix times vector
-  #endsensitivity
-  """
-  
-  begs = integratorvars['xbegs_var'][:,1:]#all but not first item
-  ends = integratorvars['results_var'][0:begs.shape[0],0:-1]  # all but not last item ###############chci to rollovat po axis CASOVY - shape[1]] (ne po shape[0])
-  if (result['eqcon'] == None or len(result['eqcon'])<=0):
-    result['eqcon'] = T.flatten(ends-begs)
-  else:
-    result['eqcon'] = T.concatenate(result['eqcon'],T.flatten(ends-begs))
-
-  """
-  #dod sensitivities for eqcon will be in the form of vectors
-  begssens = sensvarsx['xbegs_var'][:, 1:]  # all but not first item
-  endssens = sensvarsx['results_var'][0:begssens.shape[0], 0:-1]
-  """
-    
-  #if the function returns list of matrices for example, we need to make one big vector out of it...
-  if (isinstance(result['incon'],list) and len(result['incon'])>=1):
-    for il in result['incon']:
-      il = T.flatten(il)
-    if len(result['incon'])==1:
-      result['incon'] = result['incon'][0]
-    else:
-      result['incon'] = T.stack(result['incon'])
-      
-  
-  
-  #result['debug1'] = ends
-    
-  theanoresult={}
-  for key in result:
-    if (result[key] is not None):
-      theanoresult[key] = result[key] #Out(variable = result[key])#, name = key) variant #2
-  
-  inputsarray =  [In(integratorvars['xbegs_var'], name='x'),
-                 In(u_function, name='u'),
-                 In(p_params, name='p'),
-                 In(integratorvars['numsteps_var'], name='k'),
-                 In(integratorvars['Tmax_var'], name='Tmax')] + inputsarray
-  
-  theano.config.on_unused_input = 'warn'
-  objective_call = theano.function(inputs=inputsarray,
-                              outputs=theanoresult,#updates=None,
-                              allow_input_downcast = True,                                             #todo try false and see where the downcast originates.
-                              on_unused_input='warn'          #u_function for example...
-                              )                 #http://deeplearning.net/software/theano/library/compile/io.html
-                   #f a list of Variable or Out instances is given as argument, then the compiled function will return a list of their values. 
-  
-  #def rtnf(x,u,p,k,Tmax):
-  #  return objective_call(x=T.cast(x,'float32'),u=T.cast(u,'float32'),p=T.cast(p,'float32'),k=k,Tmax=T.cast(Tmax,'float32'))
-  
-  return objective_call  
-
-#pouziti:
-#def
-#jednou
-#calleval = ModelMultiEval(BuildTheanoModel(f,objcon))
-#v kazdy iteraci optimalizatoru
-#calleval.ObjCall({'x': konkretni hodnota x, 'u': konretni hodnota u, 'k': pocet integracnich iteraci})
-#tohle je nasrel, konkretne je tam nesrovnalost mezi poctem promennejch
-# - objcall bere jedno x a funkce z buildtheanomodel bere 3 [xbegs,ufunction,pocetinteg]
-#xbegs je parametr kde se zacina, u func je jaka je tam kontrolni funkce a oboji se optimalizuje!
+      how theano orders jacobians:
+      In[3]: import theano
+      In[4]: import theano.tensor as T
+      In[5]: x = T.dvector('x')
+      In[6]: y=T.concatenate([x,2.0*x])
+      In[7]: J = T.jacobian(y,x)
+      In[8]: f = theano.function([x],J)
+      In[9]: f([4,5,6])
+      Out[9]:
+      array([[ 1.,  0.,  0.],
+             [ 0.,  1.,  0.],
+             [ 0.,  0.,  1.],
+             [ 2.,  0.,  0.],
+             [ 0.,  2.,  0.],
+             [ 0.,  0.,  2.]])
+      In[10]: f([4,5])
+      Out[10]:
+      array([[ 1.,  0.],
+             [ 0.,  1.],
+             [ 2.,  0.],
+             [ 0.,  2.]])
+      In[11]: f([4,5])[0,:]
+      Out[11]: array([ 1.,  0.])
+      In[12]: f([1])
+      Out[12]:
+      array([[ 1.],
+             [ 2.]])
+      In[13]: f([1])[0,:]
+      Out[13]: array([ 1.])
+      In[14]: f([1])[1,:]
+      Out[14]: array([ 2.])
+      """

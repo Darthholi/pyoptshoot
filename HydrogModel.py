@@ -202,16 +202,18 @@ def main():
         #       :(ModelData['numcontrols']*ndisc+(inumstates)*(ndisc-1)),1)'
         #   ceq = [ceq,(xquaa-xquab).*(xquaa-xquab)]#begin at the next time slot where you ended in the previous time slot
 
-        ret['eqcon'] = []  # other things that need to be equal to zero, comes from problem formulation                                                                      #dod kolik eqs? secist nebo soustavu? soustavu!
+        ret['eqcon'] = []  # other things that need to be equal to zero, comes from problem formulation
+        ret['incon'] = []  # other things that need to be greater than zero, comes from problem formulation
         # c = [f(4)-ModelData.Wbattmaxf(5)-ModelData.Wfcmax...
         #    -f(7)-f(8)]' #\leq 0                             #radek ... toto ma byt mensi nez nula
 
-        #inequality constraints - taken care by stateMax, stateMin but not for the last node...
-        ret['incon'] = [-sim[0], -sim[1], sim[0] - ModelData['Wbattmax'], sim[1] - ModelData['Wfcmax']]
+        #inequality constraints - taken care by stateMax, stateMin but not for the last node... ... finito, now taken care by object..
+        #ret['incon'] = [-sim[0], -sim[1], sim[0] - ModelData['Wbattmax'], sim[1] - ModelData['Wfcmax']]
         return ret
 
     x0 = [ ModelData['Wbattinit'], 0]#,0 ]
     xend=[None,None]#,None]
+    print "calling simmodel..."
     OptimSim = solv.SimModel(x0,xend,
                       stateMax=[ModelData['Wbattmax'],ModelData['Wfcmax']],#,np.inf],
                       stateMin=[0,0],#,-np.inf],
@@ -225,7 +227,9 @@ def main():
                       otherparamsMin=None,   #params to optimize, that are not states and not controls...
                       otherparamsMax=None,
                       T=ModelData['t_end'])
+    print "calling gen"
     OptimSim.GenForDiscretization(ndisc=32,maxoptimizers=1000,odeintsteps=1000)
+    print "running optim"
     res=OptimSim.RunOptim()
     OptimSim.DrawResults(res)
 
