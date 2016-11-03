@@ -15,7 +15,8 @@ todo:
 #general objects:
 import copy
 from theano.compile.io import In
-from theano.compile.io import Out  
+from theano.compile.io import Out
+from theano.compile.nanguardmode import NanGuardMode
 import numpy as np
 import scipy as sp
 import theano.tensor as T
@@ -139,8 +140,8 @@ class SimModel:
     self.optchoice = None
  
   def GenForDiscretization(self,ndisc=32,maxoptimizers=1000,odeintsteps=1000,
-                           optchoice=pyPSQP.PSQP(options={'IPRINT': 2,
-                                                          'MIT': 1000})  #set to None to use scipy...
+                           optchoice=pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': 1000})
+                           #pyPSQP.PSQP(options={'IPRINT': 2,'MIT': 1000})  #set to None to use scipy...
                            ):                  #ndisc INCLUDES the beginning and ending point regardless if we set them to be free or not!
     self.maxoptimizers=maxoptimizers
     self.odeintsteps=odeintsteps
@@ -156,7 +157,8 @@ class SimModel:
           self.startmaptopack.append(i) 
     self.PackForOptimSize += (self.ndisc-2)*self.multipleshootingdim #self.statebeg.size[0] #each state has its own discretization points
     self.PackForOptimSize += (self.ndisc-1)*self.controlfdim  #each control has its own discretization points - also in the first point!
-    if (len(self.otherparamsMin.shape)>0):
+    self.pparams_use = len(self.otherparamsMin.shape) > 0
+    if (self.pparams_use):
       self.PackForOptimSize += self.otherparamsMin.shape[0]     
     
     #so the packing is like this:
@@ -221,10 +223,10 @@ class SimModel:
       #if we use f64 then np.empty is not needed for u,p
       ret['x']=np.empty([self.multipleshootingdim,(ndisc-2)+1],floatUse)
       ret['u']=np.empty([self.controlfdim,ndisc-1],floatUse)
-      if (len(self.otherparamsMin.shape)>0):
+      if (self.pparams_use):
         ret['p']=np.empty(self.otherparamsMin.shape[0],floatUse)
-      else:
-        ret['p'] = None
+      #else:
+      #  ret['p'] = None do not even name it ....
       xoffset=0
       for i in range(self.statebeg.shape[0]):
         if (self.statebeg[i] != None):
@@ -236,7 +238,7 @@ class SimModel:
       xoffset+=(ndisc-2)*self.multipleshootingdim
       ret['u'][:,:]=np.reshape(Packed[xoffset:xoffset+(ndisc-1)*self.controlfdim],(self.controlfdim,ndisc-1))
       xoffset+=(ndisc-1)*self.controlfdim
-      if (len(self.otherparamsMin.shape)>0):
+      if (self.pparams_use):
         ret['p'][:]=Packed[xoffset:]  #totally should be ... otherparamsMin.size[0]
      
       #print self.controlfdim
@@ -248,7 +250,10 @@ class SimModel:
 
   def BuildTheanoModel(self, f, objcon, constarrays, gensens, sumlastaxis=False):
     u_function = T.matrix("u_function")  # parametrizovana ridici funkce
-    p_params = T.vector("p_params")
+    if (self.pparams_use):
+      p_params = T.vector("p_params")
+    else:
+      p_params = None
   
     inputsarray = []
     theano_constarrays = None
@@ -261,8 +266,7 @@ class SimModel:
           inputsarray.append(In(theano_constarrays[key], name=key))
           # else:#error
   
-    def finteg(accum,
-               t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
+    def finteg(accum, t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
       listres = f(accum, t[0], u_function, p_params, theano_constarrays)
       return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
   
@@ -356,18 +360,21 @@ class SimModel:
     if (gensens == 'ad'):#automatic differentiation. Better than finite differences, but goes over the integrator routine....
       result['objgrad_x'] = T.grad(result['obj'], integratorvars['xbegs_var'])  # vector
       result['objgrad_u'] = T.grad(result['obj'], u_function)  # vector
-      result['objgrad_p'] = T.grad(result['obj'], p_params, disconnected_inputs='ignore')  # vector
+      if (self.pparams_use):
+        result['objgrad_p'] = T.grad(result['obj'], p_params, disconnected_inputs='ignore')  # vector
 
       # matrices we want [i,j] di/dj
       if (result.has_key('eqcon') and result['eqcon'] is not None):
         result['eqcongrad_x'] = T.jacobian(result['eqcon'], integratorvars['xbegs_var'])
         result['eqcongrad_u'] = T.jacobian(result['eqcon'], u_function)
-        result['eqcongrad_p'] = T.jacobian(result['eqcon'], p_params, disconnected_inputs='ignore')
+        if (self.pparams_use):
+          result['eqcongrad_p'] = T.jacobian(result['eqcon'], p_params, disconnected_inputs='ignore')
     
       if (result.has_key('incon') and result['incon'] is not None):
         result['incongrad_x'] = T.jacobian(result['incon'], integratorvars['xbegs_var'])
         result['incongrad_u'] = T.jacobian(result['incon'], u_function)
-        result['incongrad_p'] = T.jacobian(result['incon'], p_params, disconnected_inputs='ignore')
+        if (self.pparams_use):
+          result['incongrad_p'] = T.jacobian(result['incon'], p_params, disconnected_inputs='ignore')
   
     """
     #hypothetical sensitivity calculation not using automatic differentiation
@@ -428,10 +435,12 @@ class SimModel:
     for key in result:
       if (result[key] is not None):
         theanoresult[key] = result[key]  # Out(variable = result[key])#, name = key) variant #2
-  
+
+    if (self.pparams_use):
+      inputsarray = [In(p_params, name='p')] + inputsarray
+    
     inputsarray = [In(integratorvars['xbegs_var'], name='x'),
                    In(u_function, name='u'),
-                   In(p_params, name='p'),
                    In(integratorvars['numsteps_var'], name='k'),
                    In(integratorvars['Tmax_var'], name='Tmax')] + inputsarray
   
@@ -439,7 +448,8 @@ class SimModel:
     objective_call = theano.function(inputs=inputsarray,
                                      outputs=theanoresult,  # updates=None,
                                      allow_input_downcast=True,  # todo try false and see where the downcast originates.
-                                     on_unused_input='warn'  # u_function for example...
+                                     on_unused_input='warn',  # u_function for example...
+                                     mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
                                      )  # http://deeplearning.net/software/theano/library/compile/io.html
     # f a list of Variable or Out instances is given as argument, then the compiled function will return a list of their values.
 
@@ -470,7 +480,7 @@ class SimModel:
     for i in xrange(self.multipleshootingdim):
       randinitx[i,:] = np.zeros((1,self.ndisc-2)) if cstartzeroes else np.random.uniform(low=self.stateMin[i], high=self.stateMax[i], size=(1,self.ndisc-2))
     otherparamsinit = None
-    if (len(self.otherparamsMin.shape)>0):
+    if (self.pparams_use):
       otherparamsinit = np.random.uniform(low=self.otherparamsMin,high=self.otherparamsMax)
       
     x0 = self.PackForOptim(np.zeros(self.stateMin.shape) if cstartzeroes else np.random.uniform(low=self.stateMin, high=self.stateMax),
@@ -483,7 +493,7 @@ class SimModel:
     for i in xrange(self.multipleshootingdim):
       wlinitx[i,:] = self.stateMin[i]
     otherparamsminp = None
-    if (len(self.otherparamsMin.shape)>0):
+    if (self.pparams_use):
       otherparamsminp = self.otherparamsMin
     controlfwl = None
     if (self.controlfdim > 0):
@@ -500,7 +510,7 @@ class SimModel:
     for i in xrange(self.multipleshootingdim):
       wuinitx[i,:] = self.stateMax[i]
     otherparamsmaxp = None   
-    if (len(self.otherparamsMax.shape)>0):
+    if (self.pparams_use):
       otherparamsmaxp = self.otherparamsMax
     controlfwu = None
     if (self.controlfdim > 0):
@@ -541,7 +551,18 @@ class SimModel:
     calleval = ModelMultiEval(ObjFromPacked)     #object remembering all that we have computed to not call sim again for constraints...
 
     objx0 = calleval.ObjCall(x0)
+
+    teststate = self.TestVal()
+    testeval = teststate(x=np.zeros([self.statebeg.shape[0],1]), t=0.0, w=np.zeros([self.controlfdim,1]), p=np.zeros([self.otherparamsMin,1]) if self.pparams_use else None)
+    print "test eval state:"
+    print str(testeval)
+    
     print "obj at x0 " + str(objx0) #important to have different obj at different points ....
+    print "objsens_x at x0 "+str(calleval.Call(x0, 'objgrad_x'))
+    print "objsens_u at x0 " + str(calleval.Call(x0, 'objgrad_u'))
+    print "eqconsens_x at x0 " + str(calleval.Call(x0, 'eqcongrad_x'))
+    print "eqconsens_u at x0 " + str(calleval.Call(x0, 'eqcongrad_u'))
+    
     print "obj at wL "+str(calleval.ObjCall(wL))
     eqconx0 = calleval.EqConCall(x0)
     inconx0 = calleval.InConCall(x0)
@@ -632,7 +653,7 @@ class SimModel:
               calleval.Call(x,'objgrad_x')[:,0],#the gradient is solved against all beginning points of x. The pack for optim function takes first the initial state and then the discretized beginnings
               calleval.Call(x,'objgrad_x')[:,1:],
               calleval.Call(x,'objgrad_u'),
-              calleval.Call(x,'objgrad_p') if (len(self.otherparamsMin.shape)>0) else None
+              calleval.Call(x,'objgrad_p') if (self.pparams_use) else None
                       )
           
           # in-this-order-we-do-present-the-constraints ... must be the same at each block labelled the same...
@@ -643,7 +664,7 @@ class SimModel:
               calleval.Call(x, 'eqcongrad_x')[:, 0],
               calleval.Call(x, 'eqcongrad_x')[:, 1:],
               calleval.Call(x, 'eqcongrad_u')[:, :],
-              calleval.Call(x, 'eqcongrad_p')[:, :] if (len(self.otherparamsMin.shape) > 0) else None
+              calleval.Call(x, 'eqcongrad_p')[:, :] if (self.pparams_use) else None
             )
           else:
             for i in xrange(eqconx0num):
@@ -651,7 +672,7 @@ class SimModel:
                 calleval.Call(x, 'eqcongrad_x')[i,:, 0],
                 calleval.Call(x, 'eqcongrad_x')[i,:, 1:],
                 calleval.Call(x, 'eqcongrad_u')[i,:, :],
-                calleval.Call(x, 'eqcongrad_p')[i,:, :] if (len(self.otherparamsMin.shape)>0) else None
+                calleval.Call(x, 'eqcongrad_p')[i,:, :] if (self.pparams_use) else None
               )
               
           if (inconx0num == 1 and len(calleval.Call(x, 'incongrad_x').shape)<3):
@@ -659,7 +680,7 @@ class SimModel:
               calleval.Call(x, 'incongrad_x')[:, 0],
               calleval.Call(x, 'incongrad_x')[:, 1:],
               calleval.Call(x, 'incongrad_u')[:, :],
-              calleval.Call(x, 'incongrad_p')[:, :] if (len(self.otherparamsMin.shape) > 0) else None
+              calleval.Call(x, 'incongrad_p')[:, :] if (self.pparams_use) else None
             )
           else:
             for i in xrange(inconx0num):
@@ -667,7 +688,7 @@ class SimModel:
                 calleval.Call(x, 'incongrad_x')[i, 0],
                 calleval.Call(x, 'incongrad_x')[i, 1:],
                 calleval.Call(x, 'incongrad_u')[i, :],
-                calleval.Call(x, 'incongrad_p')[i, :]  if (len(self.otherparamsMin.shape)>0) else None
+                calleval.Call(x, 'incongrad_p')[i, :]  if (self.pparams_use) else None
               )
           fail = 0
           return [g_obj, g_con, fail]
@@ -688,7 +709,7 @@ class SimModel:
       if (inconx0num>0):
         opt_prob.addConGroup('InCons', inconx0num, type='i', lower=0.0)
       print opt_prob
-      #opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers }) <---works
+      #opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers }) <---works for finite differences
       #opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers}) <-does not work that good
       #opt = pyALGENCAN.ALGENCAN(options={'iprint': 12})                      <- to try someday, also other solvers
       opt = self.optchoice
@@ -699,6 +720,35 @@ class SimModel:
       print opt_prob.solution(0).opt_inform['text']
       found = self.UnpackForOptim(opt_prob.solution(0).parameters)
       return found
+    
+  def TestVal(self):
+    theano.config.on_unused_input = 'warn'
+    sym_x = T.vector('x', floatUse)
+    sym_t = T.scalar('t', floatUse)
+    sym_w = T.vector('w', floatUse)
+    sym_p = T.matrix('p', floatUse)
+    sym_dataarrays = T.matrix('dataarrays', floatUse)
+
+    onestateresult = self.fodestate(sym_x, sym_t, sym_w, sym_p,
+                                    sym_dataarrays)  # fodestate is defined as theano function ... so lets make python function from it
+  
+    state_j_x = T.jacobian(onestateresult, sym_x)
+    state_j_t = T.jacobian(onestateresult, sym_t)
+    state_j_w = T.jacobian(onestateresult, sym_w)
+    state_j_p = T.jacobian(onestateresult, sym_p)
+  
+    state_j_call = theano.function(inputs=[In(sym_x, name='x'),
+                                           In(sym_t, name='t'),
+                                           In(sym_w, name='w'),
+                                           In(sym_p, name='p'),
+                                           In(sym_dataarrays, name='dataarrays')],
+                                   outputs=[onestateresult,state_j_x, state_j_t, state_j_w, state_j_p],  # updates=None,
+                                   allow_input_downcast=True,
+                                   on_unused_input='warn',
+                                   mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
+                                   )
+  
+    return state_j_call
     
   def DrawResults(self,Sim):
     #-------------------------------------
@@ -717,10 +767,30 @@ class SimModel:
     theano.config.on_unused_input = 'warn'
     sym_x = T.vector('x', floatUse)
     sym_t = T.scalar('t', floatUse)
-    sym_p = T.matrix('p', floatUse)
     sym_w = T.vector('w', floatUse)
+    sym_p = T.matrix('p', floatUse)
     sym_dataarrays = T.matrix('dataarrays', floatUse)
+    
     onestateresult = self.fodestate(sym_x, sym_t, sym_w, sym_p, sym_dataarrays) #fodestate is defined as theano function ... so lets make python function from it
+    
+    """
+    state_j_x = T.jacobian(onestateresult, sym_x)
+    state_j_t = T.jacobian(onestateresult, sym_t)
+    state_j_w = T.jacobian(onestateresult, sym_w)
+    state_j_p = T.jacobian(onestateresult, sym_p)
+
+    state_j_call = theano.function(inputs=[In(sym_x, name='x'),
+                                         In(sym_t, name='t'),
+                                         In(sym_w, name='w'),
+                                         In(sym_p, name='p'),
+                                         In(sym_dataarrays, name='dataarrays')],
+                                 outputs=[state_j_x,state_j_t,state_j_w,state_j_p],  # updates=None,
+                                 allow_input_downcast=True,
+                                 on_unused_input='warn',
+                                 mode = NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
+                                 )
+    """
+    
     state_call = theano.function(inputs=[In(sym_x, name='x'),
                                          In(sym_t, name='t'),
                                          In(sym_w, name='w'),
@@ -728,7 +798,8 @@ class SimModel:
                                          In(sym_dataarrays, name='dataarrays')],
                                  outputs=onestateresult,  # updates=None,
                                  allow_input_downcast=True,
-                                 on_unused_input='warn'
+                                 on_unused_input='warn',
+                                 mode = NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
                                  )
     
     #trycall = state_call( init.astype(np.float32), np.array(0.0).astype(np.float32), Sim['u'][:,0].astype(np.float32), Sim['p'].astype(np.float32) if Sim['p'] is not None else None, self.constarrays.astype(np.float32) if self.constarrays is not None else None)

@@ -87,7 +87,7 @@ def main():
         'ElecFefficiency': 0.85,  # faradays efficiency.
         'CellVrev': 1.29,
         'CellA': 0.0025,  # m^2, area of electrolyzer electrode
-        'Celli0': np.exp(1),  # cant fit. anyway #CellA': 0.0025,#25 cm^2 area, at 65 Celsius, 1 cell,
+        'Celli0': np.exp(1.0),  # cant fit. anyway #CellA': 0.0025,#25 cm^2 area, at 65 Celsius, 1 cell,
         'CellB': 0.5172,  # Tafelparam
         'CellAt': 0.004908,  # tafel slope
         'Cellr': 0.0001521,  # resistance in Ohm Cm^2
@@ -114,9 +114,9 @@ def main():
         tl = T.cast(T.floor(t),'int32')  # thanks to python indexing it will go around cyclically
         #bc = dataarrays['PowerConditions'][tl] * (t-tl) + dataarrays['PowerConditions'][T.cast(tl+1,'int32')]* (1-t+tl)
         PowerCond = shared(ModelData['PowerConditions'][:,1])
-        bc = PowerCond[tl] * (t - tl) + PowerCond[T.cast(tl + 1, 'int32')] * (1 - t + tl)
+        bc = (PowerCond[tl] * (t - tl) + PowerCond[T.cast(tl + 1, 'int32')] * (1 - t + tl))
         #xPWO = bc
-        ubatt = w[0] * ModelData['ControlScales']
+        ubatt = (w[0] * ModelData['ControlScales'])
         #if (ubatt >= 0):  # into batt % w(ks,1) = ubatt
         #    xPWO = xPWO - ubatt
         #    dx[0] = ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0]  # x1'  for battery
@@ -124,10 +124,10 @@ def main():
         #    xPWO = xPWO - ubatt
         #    dx[0] = ubatt - ModelData['cBattSigma'] * x[0]
         #xPWO = xPWO - ubatt
-        dx[0] = T.switch(T.ge(ubatt,0.0),ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0],  # x1'  for battery
-          ubatt - ModelData['cBattSigma'] * x[0])
+        dx[0] = (T.switch(T.ge(ubatt,0.0),ubatt * ModelData['cBattEfficiency'] - ModelData['cBattSigma'] * x[0],  # x1'  for battery
+          ubatt - ModelData['cBattSigma'] * x[0]))
 
-        ufc = w[1] * ModelData['ControlScales']
+        ufc = (w[1] * ModelData['ControlScales'])
 
         """if (ufc >= 0):  # into h2 w(ks,2) = ucell    "one empirical model" - electrolyzer
             xPWO = xPWO - ufc * (
@@ -150,19 +150,19 @@ def main():
             # eaten hydrogen in units of [H2 times n_e times FaradayCOnstant]:
             dx[1] = ufc * ModelData['CellNumCell'] * ModelData['CellFInvefficiency']
         """
-        electrolyzerpwo = ufc * (
+        electrolyzerpwo = (ufc * (
             ModelData['ElecVrev'] + (ModelData['Elecr1'] + ModelData['Elecr2'] * ModelData['ElecTemp']) *
             (ufc / ModelData['ElecA']) +
             (ModelData['Elecs1'] + ModelData['Elecs2'] * ModelData['ElecTemp'] + ModelData['Elecs3'] * ModelData[
                 'ElecTemp'] ** 2) *
-            T.log(1 + (ufc / ModelData['ElecA']) * (
+            T.log(1 + T.maximum(ufc / ModelData['ElecA'],0.0)) * (
             ModelData['Elect1'] + ModelData['Elect2'] * ModelData['ElecTemp'] + ModelData['Elect3'] *
             ModelData['ElecTemp'] ** 2)))
         areacurrent = (-ufc / ModelData['CellA'])  # inside the cell
-        fuelcellpwo = ModelData['CellNumCell'] * ufc * (
+        fuelcellpwo = (ModelData['CellNumCell'] * ufc * (
           ModelData['CellVrev'] + ModelData['CellB'] * T.log(ModelData['Celli0'])
-          - ModelData['CellAt'] * T.log(areacurrent) - areacurrent * ModelData['Cellr'] +
-          ModelData['Cellm'] * T.exp(areacurrent * ModelData['Celll']))
+          - ModelData['CellAt'] * T.log(T.maximum(areacurrent,0.0001)) - areacurrent * ModelData['Cellr'] +
+          ModelData['Cellm'] * T.exp(areacurrent * ModelData['Celll'])))
 
         xPWO = bc - ubatt - T.switch(T.ge(ufc, 0.0), electrolyzerpwo, fuelcellpwo)
         
