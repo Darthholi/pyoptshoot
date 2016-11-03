@@ -619,7 +619,7 @@ class SimModel:
         if (len(g.shape)<=0):#pyopt needs an array everytime...
           g=np.array([g])
         
-        return calleval.ObjCall(x),g,fail
+        return [calleval.ObjCall(x),g,fail]
 
       if (self.gensens is not None):
         def pyoptgrad(x, f, g):
@@ -627,7 +627,8 @@ class SimModel:
           # - f -> ARRAY: Objective values
           # - g -> ARRAY: Constraint values
     
-          g_obj = self.PackForOptim(
+          g_obj = np.empty([1, self.PackForOptimSize],floatUse)
+          g_obj[0,:] = self.PackForOptim(
               calleval.Call(x,'objgrad_x')[:,0],#the gradient is solved against all beginning points of x. The pack for optim function takes first the initial state and then the discretized beginnings
               calleval.Call(x,'objgrad_x')[:,1:],
               calleval.Call(x,'objgrad_u'),
@@ -652,15 +653,24 @@ class SimModel:
                 calleval.Call(x, 'eqcongrad_u')[i,:, :],
                 calleval.Call(x, 'eqcongrad_p')[i,:, :] if (len(self.otherparamsMin.shape)>0) else None
               )
-          for i in xrange(inconx0num):
-            g_con[i + eqconx0num, :] = self.PackForOptim(
-              calleval.Call(x, 'incongrad_x')[i, 0],
-              calleval.Call(x, 'incongrad_x')[i, 1:],
-              calleval.Call(x, 'incongrad_u')[i, :],
-              calleval.Call(x, 'incongrad_p')[i, :]  if (len(self.otherparamsMin.shape)>0) else None
+              
+          if (inconx0num == 1 and len(calleval.Call(x, 'incongrad_x').shape)<3):
+            g_con[0 + eqconx0num, :] = self.PackForOptim(
+              calleval.Call(x, 'incongrad_x')[:, 0],
+              calleval.Call(x, 'incongrad_x')[:, 1:],
+              calleval.Call(x, 'incongrad_u')[:, :],
+              calleval.Call(x, 'incongrad_p')[:, :] if (len(self.otherparamsMin.shape) > 0) else None
             )
+          else:
+            for i in xrange(inconx0num):
+              g_con[i + eqconx0num, :] = self.PackForOptim(
+                calleval.Call(x, 'incongrad_x')[i, 0],
+                calleval.Call(x, 'incongrad_x')[i, 1:],
+                calleval.Call(x, 'incongrad_u')[i, :],
+                calleval.Call(x, 'incongrad_p')[i, :]  if (len(self.otherparamsMin.shape)>0) else None
+              )
           fail = 0
-          return g_obj, g_con, fail
+          return [g_obj, g_con, fail]
           #needs return g_obj vector
           #gcon - 2D array - [derivative of which con][over which x]
   

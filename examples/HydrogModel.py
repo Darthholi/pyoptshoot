@@ -96,7 +96,7 @@ def main():
         'CellFInvefficiency': 1.0 / 0.89,
         'CellNumCell': 2,
     }
-    PowerConditions = np.loadtxt('data2.txt', delimiter=' ')  # dlmread('data2.txt')
+    PowerConditions = np.loadtxt('examples\data2.txt', delimiter=' ')  # dlmread('data2.txt')
     PowerConditions[:, 0] = PowerConditions[:, 0] * (ModelData['PowerConditionsTimeScale'] / timescales)
     PowerConditions[:, 1] = PowerConditions[:, 1] * (-1.0)  # data are for electricity consumption. So make it electricity generation.
     ModelData['PowerConditions'] = PowerConditions
