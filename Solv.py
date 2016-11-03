@@ -48,8 +48,7 @@ class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint
     self.lastx = None
     self.result = None
     self.debugprint = True
-    self.iter = 0
-    self.integratorfunc = tint.theano_inner_rk4_step
+    self.feval = 0
     
   def FuncCall(self,x):
     if (self.lastx is None or np.any(x != self.lastx)):
@@ -58,18 +57,18 @@ class ModelMultiEval:     #a class that simplyfies the cases wen obj, constraint
       self.result = copy.deepcopy(self.MasterFun(x))  # only thing needed if no dbugprint
 
       if (self.debugprint and self.lastx is not None):
-        self.iter +=1
-        print "res: "+str(self.result['obj'])+" at iter "+str(self.iter)+" xdiff: "+str(np.max(np.abs(x - self.lastx)))+" objdiff:"+str(self.result['obj']-self.oldobj)
+        self.feval +=1
+        print "res: "+str(self.result['obj'])+" at feval "+str(self.feval)+" xdiff: "+str(np.max(np.abs(x - self.lastx)))+" objdiff:"+str(self.result['obj']-self.oldobj)
     
       self.lastx = copy.deepcopy(x)  # only thing needed if no debugprint
     
   def ObjCall(self,x):
     self.FuncCall(x)
-    return np.cast(self.result['obj']),floatUse)
+    return float(self.result['obj'])
   
   def Call(self,x,str):
     self.FuncCall(x)
-    return np.cast(self.result[str]),floatUse)
+    return self.result[str]
   
   def ObjGradCall(self,x):
     self.FuncCall(x)
@@ -105,7 +104,8 @@ class SimModel:
         otherparamsMax=None,
         laststatesum = False,#set true if fodestate returns more dimensions, than there are state equations
         T=1,
-        gensens = 'ad'):
+        gensens = 'ad'
+               ):
     self.gensens = gensens
     self.statebeg = np.array(statebeg)                  #None means IS not fixed...
     self.stateend = np.array(stateend)
@@ -135,12 +135,17 @@ class SimModel:
       
     self.T = T #fixed timespan [0,T] for ode solver.
 
-#dod - volat simulaci s hodnotama z optimalizatoru, A pridat k nim pevny hodnoty pokud fixedbegin OK
+    self.integratorfunc = tint.theano_inner_rk4_step
+    self.optchoice = None
  
-  def GenForDiscretization(self,ndisc=32,maxoptimizers=1000,odeintsteps=1000):                  #ndisc INCLUDES the beginning and ending point regardless if we set them to be free or not!
+  def GenForDiscretization(self,ndisc=32,maxoptimizers=1000,odeintsteps=1000,
+                           optchoice=pyPSQP.PSQP(options={'IPRINT': 2,
+                                                          'MIT': 1000})  #set to None to use scipy...
+                           ):                  #ndisc INCLUDES the beginning and ending point regardless if we set them to be free or not!
     self.maxoptimizers=maxoptimizers
     self.odeintsteps=odeintsteps
     self.ndisc = ndisc #number of discretization points
+    self.optchoice = optchoice
     
     #how many variables will we be optimizing?
     self.startmaptopack = []
@@ -181,7 +186,7 @@ class SimModel:
       if (self.controlfdim>0):
         packed[xoffset:(xoffset+self.controlfdim*(self.ndisc-1))] = np.reshape(u,self.controlfdim*(self.ndisc-1))
         xoffset+=self.controlfdim*(self.ndisc-1)
-      if (p is not None):
+      if (p is not None and len(packed)>xoffset):#is p given AND was given at the beginning of the algorrithm
         packed[xoffset:] = p[:]
       
       return packed
@@ -251,7 +256,7 @@ class SimModel:
       if isinstance(constarrays, dict):
         theano_constarrays = {}
         for key in constarrays.keys():
-          theano_constarrays[key] = TensorType(floatUse,
+          theano_constarrays[key] = T.TensorType(floatUse,
                                                (False,) * len(constarrays[key].shape))  # T.matrix("constarrays_" + key)
           inputsarray.append(In(theano_constarrays[key], name=key))
           # else:#error
@@ -343,30 +348,31 @@ class SimModel:
     """
   
     """
-    #dod sensitivities for eqcon will be in the form of vectors
+    # sensitivities for eqcon will be in the form of vectors
     begssens = sensvarsx['xbegs_var'][:, 1:]  # all but not first item
     endssens = sensvarsx['results_var'][0:begssens.shape[0], 0:-1]
     """
   
-    if (gensens == 'ad'):
+    if (gensens == 'ad'):#automatic differentiation. Better than finite differences, but goes over the integrator routine....
       result['objgrad_x'] = T.grad(result['obj'], integratorvars['xbegs_var'])  # vector
       result['objgrad_u'] = T.grad(result['obj'], u_function)  # vector
       result['objgrad_p'] = T.grad(result['obj'], p_params, disconnected_inputs='ignore')  # vector
 
       # matrices we want [i,j] di/dj
-      if (result['eqcon'] is not None):
+      if (result.has_key('eqcon') and result['eqcon'] is not None):
         result['eqcongrad_x'] = T.jacobian(result['eqcon'], integratorvars['xbegs_var'])
         result['eqcongrad_u'] = T.jacobian(result['eqcon'], u_function)
         result['eqcongrad_p'] = T.jacobian(result['eqcon'], p_params, disconnected_inputs='ignore')
     
-      if (result['incon'] is not None):
+      if (result.has_key('incon') and result['incon'] is not None):
         result['incongrad_x'] = T.jacobian(result['incon'], integratorvars['xbegs_var'])
         result['incongrad_u'] = T.jacobian(result['incon'], u_function)
         result['incongrad_p'] = T.jacobian(result['incon'], p_params, disconnected_inputs='ignore')
   
     """
+    #hypothetical sensitivity calculation not using automatic differentiation
     if (self.gensens == 'sens' ):
-      # sensitivity here #dod overit ze d+1 jsou na spravnym miste...
+      # sensitivity here #todo overit ze d+1 jsou na spravnym miste...
       # we do not account for starting point being dependent on p or u...
       def fintegpartialx(accum,t):  # integrator inputs only accumulator vector and time scalar, so other parametrs we need to input NOW.
         listres =  T.gradient.jacobian(finteg,x) # = partial finteg / partial x ... matrix d x d+1 .... #f(accum,t[0],u_function,p_params,theano_constarrays)
@@ -380,7 +386,7 @@ class SimModel:
         listres =  # = partial finteg / partial p #f(accum,t[0],u_function,p_params,theano_constarrays)
         return theano.tensor.stack(*listres)  # f does not need to use theano notation, can return [a,b]
 
-      #sens: (dim x dim+1 x ndisc) #+1 for 'additional state for cost'  # poradi v druhym nasobiteli? dod
+      #sens: (dim x dim+1 x ndisc) #+1 for 'additional state for cost'  # poradi v druhym nasobiteli? #todo
       #if we set it like this, then it means that sensvar[i,j,n] is a sensitivity of state[j] against change in [i]
       #(if dim+1 is somewhere else than in the middle, change from now on)
 
@@ -448,7 +454,7 @@ class SimModel:
     #def random_vectored(low, high,):
     #  return [random.uniform(low[i], high[i]) for i in xrange(low.size[0])]
     
-    #dod specifikovat zacatek, pripadne ho vzit z minulyho behu...
+    #todo specifikovat zacatek, pripadne ho vzit z minulyho behu...
     
     print self.multipleshootingdim
     print self.ndisc-2
@@ -526,6 +532,7 @@ class SimModel:
                                          self.laststatesum)  # state,ModelFunkce)
         
       computedsim = self.ParallelizSim(**case)
+      return computedsim
     
     self.ObjFromPacked = ObjFromPacked
             
@@ -566,9 +573,7 @@ class SimModel:
     solution.
     """
     
-    
-    cusescipy =False
-    if (cusescipy):
+    if (self.optchoice is None): #None for scipy OR assigned class for pyopt. #todo possible additions are ipopt....
       #todo sensitivities
       if (eqconx0num>0 or eqconx0num>0):
         xconstr = []
@@ -581,7 +586,7 @@ class SimModel:
         
       res = scipy.optimize.minimize(fun = calleval.ObjCall,
           x0=x0, args=(), method='SLSQP', jac=False, hess=None, hessp=None, #SLSQP #BFGS #COBYLA
-          bounds=zip(wL,wU),     #dod je zip spravne?
+          bounds=zip(wL,wU),
           constraints=xconstr,
           tol=1e-9, callback=None,
           options={'maxiter': self.maxoptimizers, 'disp':True, 'iprint':2})
@@ -605,11 +610,15 @@ class SimModel:
         g = []
         #in-this-order-we-do-present-the-constraints ... must be the same at each block labelled the same...
         if (eqconx0num>0 and inconx0num>0):
-          g=np.concatenate([calleval.EqConCall(x),calleval.InConCall(x)])
+          g=np.concatenate([np.array(calleval.EqConCall(x)),np.array(calleval.InConCall(x))])
         elif (eqconx0num>0):
-          g = calleval.EqConCall(x)
+          g = np.array(calleval.EqConCall(x))
         elif (inconx0num>0):
-          g = calleval.InConCall(x)
+          g = np.array(calleval.InConCall(x))
+        
+        if (len(g.shape)<=0):#pyopt needs an array everytime...
+          g=np.array([g])
+        
         return calleval.ObjCall(x),g,fail
 
       if (self.gensens is not None):
@@ -622,26 +631,33 @@ class SimModel:
               calleval.Call(x,'objgrad_x')[:,0],#the gradient is solved against all beginning points of x. The pack for optim function takes first the initial state and then the discretized beginnings
               calleval.Call(x,'objgrad_x')[:,1:],
               calleval.Call(x,'objgrad_u'),
-              calleval.Call(x,'objgrad_p')
+              calleval.Call(x,'objgrad_p') if (len(self.otherparamsMin.shape)>0) else None
                       )
           
           # in-this-order-we-do-present-the-constraints ... must be the same at each block labelled the same...
           if (eqconx0num>0 or eqconx0num>0):
-            g_con = np.empty(eqconx0num+inconx0num, self.PackForOptimSize)
-          for i in xrange(eqconx0num):
-            g_con[i, :] = self.PackForOptim(
-              calleval.Call(x, 'eqcongrad_x')[i, 0],
-              calleval.Call(x, 'eqcongrad_x')[i, 1:],
-              calleval.Call(x, 'eqcongrad_u')[i, :],
-              calleval.Call(x, 'eqcongrad_p')[i, :]
+            g_con = np.empty([eqconx0num+inconx0num, self.PackForOptimSize],floatUse)
+          if (eqconx0num == 1 and len(calleval.Call(x, 'eqcongrad_x').shape)<3):
+            g_con[0, :] = self.PackForOptim(
+              calleval.Call(x, 'eqcongrad_x')[:, 0],
+              calleval.Call(x, 'eqcongrad_x')[:, 1:],
+              calleval.Call(x, 'eqcongrad_u')[:, :],
+              calleval.Call(x, 'eqcongrad_p')[:, :] if (len(self.otherparamsMin.shape) > 0) else None
             )
+          else:
+            for i in xrange(eqconx0num):
+              g_con[i, :] = self.PackForOptim(
+                calleval.Call(x, 'eqcongrad_x')[i,:, 0],
+                calleval.Call(x, 'eqcongrad_x')[i,:, 1:],
+                calleval.Call(x, 'eqcongrad_u')[i,:, :],
+                calleval.Call(x, 'eqcongrad_p')[i,:, :] if (len(self.otherparamsMin.shape)>0) else None
+              )
           for i in xrange(inconx0num):
             g_con[i + eqconx0num, :] = self.PackForOptim(
               calleval.Call(x, 'incongrad_x')[i, 0],
               calleval.Call(x, 'incongrad_x')[i, 1:],
-              calleval.Call(x, 'incongrad_x')[i, :],
               calleval.Call(x, 'incongrad_u')[i, :],
-              calleval.Call(x, 'incongrad_p')[i, :]
+              calleval.Call(x, 'incongrad_p')[i, :]  if (len(self.otherparamsMin.shape)>0) else None
             )
           fail = 0
           return g_obj, g_con, fail
@@ -662,9 +678,10 @@ class SimModel:
       if (inconx0num>0):
         opt_prob.addConGroup('InCons', inconx0num, type='i', lower=0.0)
       print opt_prob
-      #opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers})
-      opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers })
-      #opt = pyALGENCAN.ALGENCAN(options={'iprint': 12})
+      #opt = pyPSQP.PSQP(options={'IPRINT': 2, 'MIT': self.maxoptimizers }) <---works
+      #opt = pySLSQP.SLSQP(options={'IPRINT': 0, 'MAXIT': self.maxoptimizers}) <-does not work that good
+      #opt = pyALGENCAN.ALGENCAN(options={'iprint': 12})                      <- to try someday, also other solvers
+      opt = self.optchoice
       #FSQP(options={'iprint': 3, 'miter': self.maxoptimizers })
       res = opt(opt_prob, sens_type=sens_type, disp_opts=True, sens_mode='',sens_step=1e-4)
       # Solve Problem with Optimizer Using Finite Difference

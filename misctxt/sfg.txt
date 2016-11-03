@@ -1,0 +1,15 @@
+Popis:
+
+V diplomové práci jsem aplikoval metodu multiple shooting na optimalizaci øízení systému s elektrolyzérem a palivovými èlánky. 
+Výsledný kód byl vyrobený v matlabu a ukázal, že nejlépe funguje øešiè SQP a že postup jde aplikovat na problém.
+
+Bohužel v matlabu bylo øešení pomalé, takže pro lepší praktické použití je potøeba všechno zrychlit.
+Cíl SFG by bylo naprogramovat algoritmus multiple shooting v pythonu s použitím knihoven na automatickou diferenciaci a paralelizaci na gpu (paralelizoval by se výpoèet sensitivit a diferenciálních rovnic, jako øešiè nelineárního programování by se použilo scipy nebo pyopt).
+Modul by dostal zadané poèáteèní podmínky, vazbové funkce, stavové rovnice závislé na øídící funkci a parametrech a pro daný poèet diskretizaèních bodù by vygeneroval optimální øídící funkci (po èástech konstantní).
+
+Možné použití:
+-Aplikace pro pøípravu èlánku o optimálním øízení (a optimální konfiguraci) systému s obnovitelnými zdroji
+-Opensource projekt numerického software na github, jako paralelizovaný øešiè fungující bez výpoèetních clusterù
+-Paralelizovaný ODE øešiè (vèetnì sensitivit bez nutnosti zadávat jakobián)
+-Výukový-bonusový materiál pro cvièení k pøednášce o optimalizaci / k pøednášce o paralelních výpoètech
+
